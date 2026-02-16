@@ -5,8 +5,8 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
-#SBATCH --gpus-per-node=2
-#SBATCH --mem=128G
+#SBATCH --gpus-per-node=4
+#SBATCH --mem=256G
 #SBATCH --time=08:00:00
 #SBATCH -o slurm-%j.out
 #SBATCH -e slurm-%j.err
@@ -26,5 +26,4 @@ torchrun --nproc_per_node=auto --nnodes=1 --node_rank=0 \
 extract_features.py \
 --data-path ${IMAGENET_PATH}  \
 --features-path ${OUTPUT_DIR} \
---hf
---num-workers 2
+--num-workers 4
