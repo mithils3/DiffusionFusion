@@ -11,7 +11,8 @@ Reference - https://github.com/chuanyangjin/fast-DiT
 
 
 from diffusers.models import AutoencoderKL
-from datasets import load_dataset
+from datasets import Array3D, Dataset, Features, Value, concatenate_datasets, load_dataset
+from datasets.arrow_writer import ArrowWriter
 from tqdm import tqdm
 import os
 import logging
@@ -19,6 +20,7 @@ import argparse
 from time import time
 from glob import glob
 from copy import deepcopy
+import shutil
 from PIL import Image
 from collections import OrderedDict
 import numpy as np
@@ -138,10 +140,11 @@ def main(args):
     # Setup a feature folder:
     if rank == 0:
         os.makedirs(args.features_path, exist_ok=True)
-        os.makedirs(os.path.join(args.features_path,
-                    'imagenet256_features'), exist_ok=True)
-        os.makedirs(os.path.join(args.features_path,
-                    'imagenet256_labels'), exist_ok=True)
+        tmp_shard_dir = os.path.join(args.features_path, "_tmp_hf_latent_shards")
+        if os.path.exists(tmp_shard_dir):
+            shutil.rmtree(tmp_shard_dir)
+        os.makedirs(tmp_shard_dir, exist_ok=True)
+    dist.barrier()
 
     # Create model:
     assert args.image_size % 8 == 0, "Image size must be divisible by 8 (for the VAE encoder)."
@@ -185,7 +188,17 @@ def main(args):
         prefetch_factor=4,
     )
 
-    NUM_SAMPLES = len(sampler)
+    tmp_shard_dir = os.path.join(args.features_path, "_tmp_hf_latent_shards")
+    rank_shard_path = os.path.join(tmp_shard_dir, f"rank_{rank:05d}.arrow")
+    hf_features = Features(
+        {
+            "feature": Array3D(shape=(4, latent_size, latent_size), dtype="float32"),
+            "label": Value("int64"),
+            # used to restore deterministic global ordering after rank-wise writes
+            "sample_id": Value("int64"),
+        }
+    )
+    shard_writer = ArrowWriter(path=rank_shard_path, features=hf_features)
 
     train_steps = 0
     for batch in tqdm(loader, total=len(loader), desc=f"Rank {rank}"):
@@ -202,15 +215,36 @@ def main(args):
         y = y.detach().cpu().numpy()    # (bs,)
         for i in range(x.shape[0]):
             # save_num = NUM_SAMPLES * rank + train_steps * local_batch_size + i
-            save_num = train_steps * args.global_batch_size + dist.get_world_size() * \
+            sample_id = train_steps * args.global_batch_size + dist.get_world_size() * \
                 i + rank
-            np.save(f'{args.features_path}/imagenet256_features/{save_num}.npy',
-                    np.expand_dims(x[i], axis=0))
-            np.save(f'{args.features_path}/imagenet256_labels/{save_num}.npy',
-                    np.expand_dims(y[i], axis=0))
+            shard_writer.write(
+                {
+                    "feature": x[i].astype(np.float32, copy=False),
+                    "label": int(y[i]),
+                    "sample_id": int(sample_id),
+                }
+            )
 
         train_steps += 1
-        # print(save_num)
+
+    shard_writer.finalize()
+    dist.barrier()
+
+    if rank == 0:
+        shard_paths = sorted(glob(os.path.join(tmp_shard_dir, "rank_*.arrow")))
+        shard_datasets = [Dataset.from_file(path) for path in shard_paths]
+        full_dataset = concatenate_datasets(shard_datasets)
+        full_dataset = full_dataset.sort("sample_id").remove_columns("sample_id")
+
+        output_dataset_dir = os.path.join(args.features_path, args.hf_dataset_name)
+        if os.path.exists(output_dataset_dir):
+            shutil.rmtree(output_dataset_dir)
+        full_dataset.save_to_disk(output_dataset_dir)
+
+        for path in shard_paths:
+            os.remove(path)
+        os.rmdir(tmp_shard_dir)
+        print(f"Saved HF dataset to: {output_dataset_dir}")
 
     cleanup()
 
@@ -225,5 +259,6 @@ if __name__ == "__main__":
     parser.add_argument("--global-batch-size", type=int, default=256)
     parser.add_argument("--global-seed", type=int, default=0)
     parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument("--hf-dataset-name", type=str, default="imagenet256_latents")
     args = parser.parse_args()
     main(args)

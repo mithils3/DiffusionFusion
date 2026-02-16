@@ -19,21 +19,12 @@ module load cuda/12.6.1
 
 source /u/msalunkhe/.venv/bin/activate
 cd /u/msalunkhe/DiffusionFusion/JiT
-IMAGENET_PATH="timm/mini-imagenet"
+IMAGENET_PATH="ILSVRC/imagenet-1k"
 OUTPUT_DIR="/work/nvme/betw/msalunkhe/data/"
 # Avoid thread explosion across DDP ranks + DataLoader workers.
 torchrun --nproc_per_node=auto --nnodes=1 --node_rank=0 \
 extract_features.py \
 --data-path ${IMAGENET_PATH}  \
 --features-path ${OUTPUT_DIR} \
+--hf
 --num-workers 2
-  IMAGENET_PATH="timm/mini-imagenet"
-  OUTPUT_DIR="/work/nvme/betw/msalunkhe/data"
-
-  python prepare_ref.py \
-    --use_hf_dataset \
-    --data_path "$IMAGENET_PATH" \
-    --hf_split train \
-    --hf_image_column image \
-    --img_size 256 \
-    --output_path "${OUTPUT_DIR}/mini-imagenet-train-256"
