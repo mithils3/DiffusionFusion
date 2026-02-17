@@ -2,6 +2,7 @@ import math
 import sys
 import os
 import shutil
+import time
 
 import torch
 import numpy as np
@@ -160,8 +161,20 @@ def evaluate(model_without_ddp, args, epoch, vae, batch_size=64, log_writer=None
     print("Switch back from ema")
     model_without_ddp.load_state_dict(model_state_dict)
 
-    # compute FID and IS
-    if log_writer is not None or wandb_run is not None:
+    # compute FID and IS on rank 0, while other ranks wait outside NCCL collectives
+    metrics_requested = bool(getattr(args, "output_dir", None)) or bool(
+        getattr(args, "use_wandb", False)
+    )
+    metrics_done_path = os.path.join(
+        args.output_dir if getattr(args, "output_dir", None) else ".",
+        f".eval_metrics_done_epoch_{int(epoch):05d}",
+    )
+    if metrics_requested and misc.is_main_process() and os.path.exists(metrics_done_path):
+        os.remove(metrics_done_path)
+    if metrics_requested:
+        torch.distributed.barrier()
+
+    if metrics_requested and misc.is_main_process():
         if args.img_size == 256:
             fid_statistics_file = 'fid_stats/jit_in256_stats.npz'
         elif args.img_size == 512:
@@ -199,6 +212,21 @@ def evaluate(model_without_ddp, args, epoch, vae, batch_size=64, log_writer=None
                 wandb_run.log(log_payload, step=wandb_step)
         print("FID: {:.4f}, Inception Score: {:.4f}".format(
             fid, inception_score))
-        shutil.rmtree(save_folder)
+        with open(metrics_done_path, "w", encoding="utf-8") as f:
+            f.write(f"{fid},{inception_score}\n")
+    elif metrics_requested:
+        wait_start = time.time()
+        wait_timeout = float(getattr(args, "dist_timeout_sec", 7200))
+        while not os.path.exists(metrics_done_path):
+            if time.time() - wait_start > wait_timeout:
+                raise RuntimeError(
+                    f"Timed out waiting for eval metrics sync file: {metrics_done_path}"
+                )
+            time.sleep(1.0)
 
     torch.distributed.barrier()
+    if misc.is_main_process() and metrics_requested:
+        if os.path.isdir(save_folder):
+            shutil.rmtree(save_folder)
+        if os.path.exists(metrics_done_path):
+            os.remove(metrics_done_path)

@@ -22,6 +22,10 @@ from datasets import load_from_disk
 
 from diffusers.models import AutoencoderKL
 
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+torch.backends.cudnn.benchmark = True
+
 
 def get_args_parser():
     parser = argparse.ArgumentParser('JiT', add_help=False)
@@ -155,6 +159,8 @@ def get_args_parser():
     parser.add_argument('--dist_on_itp', action='store_true')
     parser.add_argument('--dist_url', default='env://',
                         help='URL used to set up distributed training')
+    parser.add_argument('--dist_timeout_sec', default=7200, type=int,
+                        help='Distributed process group timeout in seconds')
 
     return parser
 
