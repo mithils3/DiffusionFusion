@@ -17,5 +17,4 @@ class CustomDataset(Dataset):
         print(labels)
         # make sure the dims are features are 3d and labels are 1d
         assert features.ndim == 3, f"Expected features to be 3D, but got {features.ndim}D"
-        assert labels.ndim == 1, f"Expected labels to be 1D, but got {labels.ndim}D"
-        return {"x": features, "y": labels.long()}
+        return {"x": features, "y": labels}
