@@ -74,6 +74,7 @@ def train_one_epoch(model, model_without_ddp, data_loader, optimizer, device, ep
                 "train/lr": lr,
                 "train/epoch_progress": epoch + data_iter_step / steps_per_epoch,
             }, step=global_step)
+    print(f"Finished ")
 
 
 def evaluate(model_without_ddp, args, epoch, vae, batch_size=64, log_writer=None, wandb_run=None, wandb_step=None):

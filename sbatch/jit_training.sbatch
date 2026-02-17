@@ -22,6 +22,7 @@ cd /u/msalunkhe/DiffusionFusion/JiT
 git pull
 IMAGENET_PATH="/work/nvme/betw/msalunkhe/data/imagenet256_latents/"
 OUTPUT_DIR="/work/nvme/betw/msalunkhe/outputs/jit_training_full_imagenet"
+rm -rf ${OUTPUT_DIR}
 OMP_NUM_THREADS=32 torchrun --nproc_per_node=auto --nnodes=1 --node_rank=0 \
 main_jit.py \
 --model JiT-B/2-4C \
@@ -32,4 +33,4 @@ main_jit.py \
 --epochs 200 --warmup_epochs 5 \
 --gen_bsz 256 --num_images 5000 --cfg 2.9 --interval_min 0.1 --interval_max 1.0 \
 --output_dir ${OUTPUT_DIR} --resume ${OUTPUT_DIR} \
---data_path ${IMAGENET_PATH} --online_eval --num_workers 8   
+--data_path ${IMAGENET_PATH} --online_eval --num_workers 4

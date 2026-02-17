@@ -343,6 +343,7 @@ def main(args):
             )
 
             # Save checkpoint periodically
+            did_save_checkpoint = False
             if epoch % args.save_last_freq == 0 or epoch + 1 == args.epochs:
                 misc.save_model(
                     args=args,
@@ -351,6 +352,7 @@ def main(args):
                     epoch=epoch,
                     epoch_name="last"
                 )
+                did_save_checkpoint = True
 
             if epoch % 50 == 0 and epoch > 0:
                 misc.save_model(
@@ -359,6 +361,11 @@ def main(args):
                     optimizer=optimizer,
                     epoch=epoch
                 )
+                did_save_checkpoint = True
+
+            # Keep ranks in lockstep after rank-0 checkpoint I/O before eval/next epoch.
+            if did_save_checkpoint and args.distributed:
+                torch.distributed.barrier()
 
             # Perform online evaluation at specified intervals
             if args.online_eval and (epoch % args.eval_freq == 0 or epoch + 1 == args.epochs):
