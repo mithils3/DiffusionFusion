@@ -77,7 +77,7 @@ def train_one_epoch(model, model_without_ddp, data_loader, optimizer, device, ep
 
 
 def evaluate(model_without_ddp, args, epoch, vae, batch_size=64, log_writer=None, wandb_run=None, wandb_step=None):
-
+    print("Start evaluation at epoch {}".format(epoch))
     model_without_ddp.eval()
     world_size = misc.get_world_size()
     local_rank = misc.get_rank()

@@ -19,6 +19,7 @@ module load cuda/12.6.1
 
 source /u/msalunkhe/.venv/bin/activate
 cd /u/msalunkhe/DiffusionFusion/JiT
+git pull
 IMAGENET_PATH="/work/nvme/betw/msalunkhe/data/imagenet256_latents/"
 OUTPUT_DIR="/work/nvme/betw/msalunkhe/outputs/jit_training_full_imagenet"
 OMP_NUM_THREADS=32 torchrun --nproc_per_node=auto --nnodes=1 --node_rank=0 \
