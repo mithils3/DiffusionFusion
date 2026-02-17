@@ -12,8 +12,8 @@ class CustomDataset(Dataset):
         return len(self.hf_dataset)
 
     def __getitem__(self, idx):
-        features = np.array(self.hf_dataset[idx]["features"])
-        labels = np.array(self.hf_dataset[idx]["labels"])
+        features = np.array(self.hf_dataset[idx]["feature"])
+        labels = np.array(self.hf_dataset[idx]["label"])
         
         # make sure the dims are features are 3d and labels are 1d
         assert features.ndim == 3, f"Expected features to be 3D, but got {features.ndim}D"
