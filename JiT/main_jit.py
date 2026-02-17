@@ -212,7 +212,7 @@ def main(args):
         )
 
     # Data augmentation transforms
-    hf_dataset = load_from_disk(args.data_path).select(range(100000))
+    hf_dataset = load_from_disk(args.data_path)
     dataset_train = CustomDataset(hf_dataset=hf_dataset)
     
     sampler_train = torch.utils.data.DistributedSampler(
