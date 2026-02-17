@@ -18,7 +18,7 @@ from util.dataset import CustomDataset
 import copy
 from engine_jit import train_one_epoch, evaluate
 from denoiser import Denoiser
-from datasets import load_dataset
+from datasets import load_from_disk
 
 from diffusers.models import AutoencoderKL
 
@@ -207,7 +207,7 @@ def main(args):
 
     # Data augmentation transforms
 
-    dataset_train = CustomDataset(hf_dataset=load_dataset(args.data_path, split="train"))
+    dataset_train = CustomDataset(hf_dataset=load_from_disk(args.data_path))
 
     sampler_train = torch.utils.data.DistributedSampler(
         dataset_train,
