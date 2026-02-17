@@ -17,11 +17,11 @@ import util.misc as misc
 from util.dataset import CustomDataset
 import copy
 from engine_jit import train_one_epoch, evaluate
-
 from denoiser import Denoiser
 from datasets import load_dataset
 
 from diffusers.models import AutoencoderKL
+
 
 def get_args_parser():
     parser = argparse.ArgumentParser('JiT', add_help=False)
@@ -34,7 +34,8 @@ def get_args_parser():
                         default=0.0, help='Attention dropout rate')
     parser.add_argument('--proj_dropout', type=float,
                         default=0.0, help='Projection dropout rate')
-    parser.add_argument('--vae_pretrained_path', type=str, default='stabilityai/sdxl-vae')
+    parser.add_argument('--vae_pretrained_path', type=str,
+                        default='stabilityai/sdxl-vae')
 
     # training
     parser.add_argument('--epochs', default=200, type=int)
@@ -206,8 +207,7 @@ def main(args):
 
     # Data augmentation transforms
 
-    dataset_train = CustomDataset(features_dir=os.path.join(
-        args.data_path, 'imagenet256_features'), labels_dir=os.path.join(args.data_path, 'imagenet256_labels'))
+    dataset_train = CustomDataset(hf_dataset=load_dataset(args.data_path, split="train"))
 
     sampler_train = torch.utils.data.DistributedSampler(
         dataset_train,

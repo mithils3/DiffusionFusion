@@ -5,22 +5,16 @@ import numpy as np
 
 
 class CustomDataset(Dataset):
-    def __init__(self, features_dir, labels_dir):
-        self.features_dir = features_dir
-        self.labels_dir = labels_dir
-
-        self.features_files = sorted(os.listdir(features_dir))
-        self.labels_files = sorted(os.listdir(labels_dir))
+    def __init__(self, hf_dataset):
+        self.hf_dataset = hf_dataset
 
     def __len__(self):
-        assert len(self.features_files) == len(self.labels_files), \
-            "Number of feature files and label files should be same"
-        return len(self.features_files)
+        return len(self.hf_dataset)
 
     def __getitem__(self, idx):
-        feature_file = self.features_files[idx]
-        label_file = self.labels_files[idx]
-
-        features = np.load(os.path.join(self.features_dir, feature_file))
-        labels = np.load(os.path.join(self.labels_dir, label_file))
-        return {"x": torch.from_numpy(features).squeeze(0), "y": torch.from_numpy(labels).long()}
+        features = self.hf_dataset[idx]["feature"]
+        labels = self.hf_dataset[idx]["label"]
+        # make sure the dims are features are 3d and labels are 1d
+        assert features.ndim == 3, f"Expected features to be 3D, but got {features.ndim}D"
+        assert labels.ndim == 1, f"Expected labels to be 1D, but got {labels.ndim}D"
+        return {"x": torch.from_numpy(features), "y": torch.from_numpy(labels).long()}

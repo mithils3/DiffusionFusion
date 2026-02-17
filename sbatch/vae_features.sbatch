@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -J DiT_FID
+#SBATCH -J VAE_features
 #SBATCH -A betw-dtai-gh
 #SBATCH -p ghx4
 #SBATCH --nodes=1
