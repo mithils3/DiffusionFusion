@@ -212,9 +212,9 @@ def main(args):
         )
 
     # Data augmentation transforms
-
-    dataset_train = CustomDataset(hf_dataset=load_from_disk(args.data_path))
-
+    hf_dataset = load_from_disk(args.data_path).select(range(10000))
+    dataset_train = CustomDataset(hf_dataset=hf_dataset)
+    
     sampler_train = torch.utils.data.DistributedSampler(
         dataset_train,
         num_replicas=num_tasks,
@@ -352,7 +352,7 @@ def main(args):
                     epoch_name="last"
                 )
 
-            if epoch % 100 == 0 and epoch > 0:
+            if epoch % 50 == 0 and epoch > 0:
                 misc.save_model(
                     args=args,
                     model_without_ddp=model_without_ddp,
