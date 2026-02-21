@@ -396,6 +396,10 @@ def JiT_B_2_4C(**kwargs):
     return JiT(depth=12, hidden_size=768, num_heads=12,
                bottleneck_dim=128, in_context_len=32, in_context_start=4, patch_size=2,  **kwargs)
 
+def JiT_L_2_4C(**kwargs):
+    kwargs.setdefault("input_size", 32)
+    return JiT(depth=24, hidden_size=1024, num_heads=16,
+               bottleneck_dim=128, in_context_len=32, in_context_start=8, patch_size=2, **kwargs)
 
 def JiT_B_4_4C(**kwargs):
     kwargs.setdefault("input_size", 32)
@@ -437,6 +441,7 @@ JiT_models = {
     'JiT-H/32': JiT_H_32,
     'JiT-B/2-4C': JiT_B_2_4C,
     'JiT-B/4-4C': JiT_B_4_4C,
+    'JiT-L/2-4C': JiT_L_2_4C,
 }
 if __name__ == "__main__":
     module = JiT_B_2_4C(in_channels=4).cuda()
