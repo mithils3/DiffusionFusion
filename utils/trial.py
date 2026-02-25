@@ -7,16 +7,16 @@ img = Image.open(urlopen(
 ))
 
 model = timm.create_model(
-    'vit_base_patch16_dinov3_qkvb.lvd1689m',
+    'vit_large_patch16_dinov3_qkvb.lvd1689m',
     pretrained=True,
     features_only=True,
 )
 model = model.eval()
-
+print()
 # get model specific transforms (normalization, resize)
 data_config = timm.data.resolve_model_data_config(model)
 transforms = timm.data.create_transform(**data_config, is_training=False)
-
+print(transforms(img).shape)  # e.g. torch.Size([3, 224, 224])
 output = model(transforms(img).unsqueeze(0))  # unsqueeze single image into batch of 1
 
 for o in output:
