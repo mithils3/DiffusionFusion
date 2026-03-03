@@ -6,12 +6,11 @@ import timm
 from datasets import load_dataset
 from torch.utils.data.distributed import DistributedSampler
 from torch.utils.data import DataLoader
-from datasets import Array3D, Dataset, Features, Value, concatenate_datasets, load_dataset
+from datasets import Array3D, Dataset, Features, Value, load_dataset
 from datasets.arrow_writer import ArrowWriter
 from tqdm import tqdm
 import argparse
 import numpy as np
-from glob import glob
 
 
 def collate_fn(batch):
@@ -41,7 +40,7 @@ def main(args):
         f"Starting rank={rank}, seed={seed}, world_size={dist.get_world_size()}.")
     if rank == 0:
         os.makedirs(args.features_path, exist_ok=True)
-        tmp_shard_dir = os.path.join(args.features_path, "_tmp_hf_dino_shards")
+        tmp_shard_dir = os.path.join(args.features_path, "_tmp_hf_latent_shards")
         if os.path.exists(tmp_shard_dir):
             shutil.rmtree(tmp_shard_dir)
         os.makedirs(tmp_shard_dir, exist_ok=True)
@@ -88,7 +87,7 @@ def main(args):
     patches = 256 // 16
     hf_features = Features(
         {
-            "feature": Array3D(shape=(args.hidden_size, patches, patches), dtype="float32"),
+            "feature": Array3D(shape=(args.hidden_size, patches, patches), dtype="float16"),
             "label": Value("int64"),
             # used to restore deterministic global ordering after rank-wise writes
             "sample_id": Value("int64"),
@@ -113,7 +112,7 @@ def main(args):
                 i + rank
             shard_writer.write(
                 {
-                    "feature": output[i].astype(np.float32, copy=False),
+                    "feature": output[i].astype(np.float16, copy=False),
                     "label": int(y[i]),
                     "sample_id": int(sample_id),
                 }
@@ -121,24 +120,22 @@ def main(args):
         train_steps += 1
 
     shard_writer.finalize()
+
+    # each rank converts its own shard to parquet (parallelised across ranks)
+    output_dir = os.path.join(args.features_path, args.hf_dataset_name)
+    os.makedirs(output_dir, exist_ok=True)
+    shard_ds = Dataset.from_file(rank_shard_path)
+    shard_ds.to_parquet(
+        os.path.join(output_dir, f"shard_{rank:05d}.parquet"),
+        compression="zstd",
+    )
+    del shard_ds
+    os.remove(rank_shard_path)
+
     dist.barrier()
     if rank == 0:
-        shard_paths = sorted(glob(os.path.join(tmp_shard_dir, "rank_*.arrow")))
-        shard_datasets = [Dataset.from_file(path) for path in shard_paths]
-        full_dataset = concatenate_datasets(shard_datasets)
-        full_dataset = full_dataset.sort(
-            "sample_id").remove_columns("sample_id")
-
-        output_dataset_dir = os.path.join(
-            args.features_path, args.hf_dataset_name)
-        if os.path.exists(output_dataset_dir):
-            shutil.rmtree(output_dataset_dir)
-        full_dataset.save_to_disk(output_dataset_dir)
-
-        for path in shard_paths:
-            os.remove(path)
         os.rmdir(tmp_shard_dir)
-        print(f"Saved HF dataset to: {output_dataset_dir}")
+        print(f"Saved HF dataset to: {output_dir}")
 
     dist.destroy_process_group()
 
@@ -156,8 +153,8 @@ if __name__ == "__main__":
     parser.add_argument("--hf-dataset-name", type=str,
                         default="imagenet256_latents")
     parser.add_argument("--model-name", type=str,
-                        default="vit_large_patch16_dinov3_qkvb.lvd1689m")
-    parser.add_argument("--hidden-size", type=int, default=1024)
+                        default="vit_base_patch16_dinov3.lvd1689m")
+    parser.add_argument("--hidden-size", type=int, default=768)
     parser.add_argument("--num-train-steps", type=int, default=100000)
     args = parser.parse_args()
     main(args)
