@@ -228,14 +228,11 @@ def main(args):
 
     shard_writer.finalize()
 
-    # each rank converts its own shard to parquet (parallelised across ranks)
+    # each rank saves its shard as native Arrow (no format conversion overhead)
     output_dir = os.path.join(args.features_path, args.hf_dataset_name)
     os.makedirs(output_dir, exist_ok=True)
     shard_ds = Dataset.from_file(rank_shard_path)
-    shard_ds.to_parquet(
-        os.path.join(output_dir, f"shard_{rank:05d}.parquet"),
-        compression="snappy",
-    )
+    shard_ds.save_to_disk(os.path.join(output_dir, f"shard_{rank:05d}"))
     del shard_ds
     os.remove(rank_shard_path)
 
