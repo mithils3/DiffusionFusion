@@ -234,7 +234,7 @@ def main(args):
     shard_ds = Dataset.from_file(rank_shard_path)
     shard_ds.to_parquet(
         os.path.join(output_dir, f"shard_{rank:05d}.parquet"),
-        compression="zstd",
+        compression="snappy",
     )
     del shard_ds
     os.remove(rank_shard_path)
