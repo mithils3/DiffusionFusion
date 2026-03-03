@@ -10,7 +10,11 @@ from torch.utils.data import DataLoader
 from datasets import Array3D, Dataset, Features, Value, concatenate_datasets, load_dataset
 from datasets.arrow_writer import ArrowWriter
 from tqdm import tqdm
+import argparse
 import numpy as np
+from glob import glob
+
+
 def main(args):
     """
     Trains a new DiT model.
@@ -74,13 +78,13 @@ def main(args):
     rank_shard_path = os.path.join(tmp_shard_dir, f"rank_{rank:05d}.arrow")
     patches = 256 // 16
     hf_features = Features(
-            {
-                "feature": Array3D(shape=(args.hidden_size, patches, patches), dtype="float32"),
-                "label": Value("int64"),
-                # used to restore deterministic global ordering after rank-wise writes
-                "sample_id": Value("int64"),
-            }
-        )
+        {
+            "feature": Array3D(shape=(args.hidden_size, patches, patches), dtype="float32"),
+            "label": Value("int64"),
+            # used to restore deterministic global ordering after rank-wise writes
+            "sample_id": Value("int64"),
+        }
+    )
     shard_writer = ArrowWriter(path=rank_shard_path, features=hf_features)
 
     train_steps = 0
@@ -100,8 +104,47 @@ def main(args):
                 i + rank
             shard_writer.write(
                 {
-                    "feature": x[i].astype(np.float32, copy=False),
+                    "feature": output[i].astype(np.float32, copy=False),
                     "label": int(y[i]),
                     "sample_id": int(sample_id),
                 }
             )
+        train_steps += 1
+
+    shard_writer.finalize()
+    dist.barrier()
+    if rank == 0:
+        shard_paths = sorted(glob(os.path.join(tmp_shard_dir, "rank_*.arrow")))
+        shard_datasets = [Dataset.from_file(path) for path in shard_paths]
+        full_dataset = concatenate_datasets(shard_datasets)
+        full_dataset = full_dataset.sort(
+            "sample_id").remove_columns("sample_id")
+
+        output_dataset_dir = os.path.join(
+            args.features_path, args.hf_dataset_name)
+        if os.path.exists(output_dataset_dir):
+            shutil.rmtree(output_dataset_dir)
+        full_dataset.save_to_disk(output_dataset_dir)
+
+        for path in shard_paths:
+            os.remove(path)
+        os.rmdir(tmp_shard_dir)
+        print(f"Saved HF dataset to: {output_dataset_dir}")
+
+    dist.destroy_process_group()
+
+
+if __name__ == "__main__":
+    # Default args here will train DiT-XL/2 with the hyperparameters we used in our paper (except training iters).
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data-path", type=str, required=True)
+    parser.add_argument("--features-path", type=str, default="features")
+    parser.add_argument("--image-size", type=int,
+                        choices=[256, 512], default=256)
+    parser.add_argument("--global-batch-size", type=int, default=256)
+    parser.add_argument("--global-seed", type=int, default=0)
+    parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument("--hf-dataset-name", type=str,
+                        default="imagenet256_latents")
+    args = parser.parse_args()
+    main(args)
