@@ -155,5 +155,7 @@ if __name__ == "__main__":
                         default="imagenet256_latents")
     parser.add_argument("--model-name", type=str,
                         default="vit_large_patch16_dinov3_qkvb.lvd1689m")
+    parser.add_argument("--hidden-size", type=int, default=1024)
+    parser.add_argument("--num-train-steps", type=int, default=100000)
     args = parser.parse_args()
     main(args)
