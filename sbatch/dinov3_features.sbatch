@@ -23,7 +23,7 @@ IMAGENET_PATH="ILSVRC/imagenet-1k"
 OUTPUT_DIR="/work/nvme/betw/msalunkhe/data/"
 # Avoid thread explosion across DDP ranks + DataLoader workers.
 torchrun --nproc_per_node=auto --nnodes=1 --node_rank=0 \
-extract_features.py \
+feature_extraction/dinov3.py \
 --data-path ${IMAGENET_PATH}  \
 --features-path ${OUTPUT_DIR} \
 --num-workers 4 \

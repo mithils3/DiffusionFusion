@@ -2,7 +2,6 @@ import torch
 import torch.distributed as dist
 import os
 import shutil
-from JiT.main_jit import collate_fn
 import timm
 from datasets import load_dataset
 from torch.utils.data.distributed import DistributedSampler
@@ -13,6 +12,14 @@ from tqdm import tqdm
 import argparse
 import numpy as np
 from glob import glob
+
+
+def collate_fn(batch):
+    # batch is list of dicts like {"image": tensor, "label": int, ...}
+    images = torch.stack([b["image"] for b in batch], dim=0)
+    labels = torch.tensor([b.get("label", -1)
+                          for b in batch], dtype=torch.long)
+    return {"image": images, "label": labels}
 
 
 def main(args):
@@ -146,5 +153,7 @@ if __name__ == "__main__":
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--hf-dataset-name", type=str,
                         default="imagenet256_latents")
+    parser.add_argument("--model-name", type=str,
+                        default="vit_large_patch16_dinov3_qkvb.lvd1689m")
     args = parser.parse_args()
     main(args)

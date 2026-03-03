@@ -448,9 +448,9 @@ JiT_models = {
     'JiT-L/4-4C': JiT_L_4_4C,
 }
 if __name__ == "__main__":
-    module = JiT_B_2_4C(in_channels=4).cuda()
+    module = BottleneckPatchEmbed(in_chans=4,img_size=32,patch_size=2).cuda()
     random_tensor = torch.randn(1, 4, 32, 32).cuda()  # (B, C, H, W)
     random_t = torch.tensor([0.5]).cuda()  # (B,)
     random_y = torch.tensor([10]).cuda()  # (B,)
-    output = module(random_tensor, random_t, random_y)
+    output = module(random_tensor)
     print(output.shape)
