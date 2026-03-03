@@ -83,6 +83,7 @@ def main(args):
     )
 
     tmp_shard_dir = os.path.join(args.features_path, "_tmp_hf_latent_shards")
+    os.makedirs(tmp_shard_dir, exist_ok=True)
     rank_shard_path = os.path.join(tmp_shard_dir, f"rank_{rank:05d}.arrow")
     patches = 256 // 16
     hf_features = Features(
