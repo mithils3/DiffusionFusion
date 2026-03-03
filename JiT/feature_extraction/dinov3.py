@@ -50,8 +50,9 @@ def main(args):
         args.model_name,
         pretrained=True,
         features_only=True,
-    )
+    ).to(device)
     model = model.eval()
+    
     local_batch_size = args.global_batch_size // dist.get_world_size()
     data_config = timm.data.resolve_model_data_config(model)
     transforms = timm.data.create_transform(**data_config, is_training=False)
