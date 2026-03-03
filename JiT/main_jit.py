@@ -18,8 +18,8 @@ from util.dataset import CustomDataset
 import copy
 from engine_jit import train_one_epoch, evaluate
 from denoiser import Denoiser
-from datasets import load_from_disk
-
+from datasets import load_from_disk, concatenate_datasets
+from glob import glob
 from diffusers.models import AutoencoderKL
 
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -33,7 +33,10 @@ def get_args_parser():
     # architecture
     parser.add_argument('--model', default='JiT-B/16', type=str, metavar='MODEL',
                         help='Name of the model to train')
-    parser.add_argument('--img_size', default=256, type=int, help='Image size')
+    parser.add_argument('--latent_size', default=32,
+                        type=int, help='Latent size')
+    parser.add_argument('--dino_patches', default=16,
+                        type=int, help='DINO patch size')
     parser.add_argument('--attn_dropout', type=float,
                         default=0.0, help='Attention dropout rate')
     parser.add_argument('--proj_dropout', type=float,
@@ -124,6 +127,10 @@ def get_args_parser():
     parser.add_argument('--data_path', default='./data/imagenet', type=str,
                         help='Path to the dataset')
     parser.add_argument('--class_num', default=1000, type=int)
+    parser.add_argument('--dino_dir_name', default='imagenet256_dinov3_features', type=str,
+                        help='Path to DINO features dataset (HF dataset name or local path)')
+    parser.add_argument('--latent_dir_name', default='imagenet256_vae_features', type=str,
+                        help='Name for the output HF dataset containing VAE features')
 
     # checkpointing
     parser.add_argument('--output_dir', default='./output_dir',
@@ -212,8 +219,19 @@ def main(args):
         )
 
     # Data augmentation transforms
+    dino_shard_dirs = sorted(
+        glob(os.path.join(args.data_path, args.dino_dir_name, "shard_*")))
+    dino_dataset = concatenate_datasets(
+        [load_from_disk(shard_dir) for shard_dir in dino_shard_dirs])
+    dino_dataset = dino_dataset.sort("sample_id")
+    latent_shard_dirs = sorted(
+        glob(os.path.join(args.data_path, args.latent_dir_name, "shard_*")))
+    latent_dataset = concatenate_datasets(
+        [load_from_disk(shard_dir) for shard_dir in latent_shard_dirs])
+    latent_dataset = latent_dataset.sort("sample_id")
     hf_dataset = load_from_disk(args.data_path)
-    dataset_train = CustomDataset(hf_dataset=hf_dataset)
+    dataset_train = CustomDataset(
+        latent_dataset=latent_dataset, dino_dataset=dino_dataset)
 
     sampler_train = torch.utils.data.DistributedSampler(
         dataset_train,

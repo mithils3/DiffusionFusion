@@ -38,10 +38,11 @@ def train_one_epoch(model, model_without_ddp, data_loader, optimizer, device, ep
             optimizer, data_iter_step / steps_per_epoch + epoch, args)
 
         # normalize image to [-1, 1]
-        x = batch["x"].to(device, non_blocking=True)
+        latent = batch["latent"].to(device, non_blocking=True)
+        dino = batch["dino"].to(device, non_blocking=True)
         labels = batch["y"].to(device, non_blocking=True).view(-1).long()
         with torch.amp.autocast('cuda', dtype=torch.bfloat16):
-            loss = model(x, labels)
+            loss = model(latent, dino, labels)
 
         loss_value = loss.item()
         if not math.isfinite(loss_value):

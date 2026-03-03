@@ -5,15 +5,15 @@ import numpy as np
 
 
 class CustomDataset(Dataset):
-    def __init__(self, hf_dataset):
-        self.hf_dataset = hf_dataset
+    def __init__(self, latent_dataset, dino_dataset):
+        self.latent_dataset = latent_dataset
+        self.dino_dataset = dino_dataset
 
     def __len__(self):
-        return len(self.hf_dataset)
+        return len(self.latent_dataset)
 
     def __getitem__(self, idx):
-        features = torch.tensor(self.hf_dataset[idx]["feature"])
-        labels = torch.tensor(self.hf_dataset[idx]["label"]).long()
-        # make sure the dims are features are 3d and labels are 1d
-        assert features.ndim == 3, f"Expected features to be 3D, but got {features.ndim}D"
-        return {"x": features, "y": labels}
+        latent = torch.tensor(self.latent_dataset[idx]["feature"])
+        dino = torch.tensor(self.dino_dataset[idx]["feature"])
+        label = torch.tensor(self.latent_dataset[idx]["label"]).long()
+        return {"latent": latent, "dino": dino, "y": label}
