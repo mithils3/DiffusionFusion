@@ -12,14 +12,12 @@ Reference - https://github.com/chuanyangjin/fast-DiT
 
 from diffusers.models import AutoencoderKL
 from datasets import Array3D, Dataset, Features, Value, load_dataset
-from datasets.arrow_writer import ArrowWriter
 from tqdm import tqdm
 import os
 import logging
 import argparse
 from time import time
 from copy import deepcopy
-import shutil
 from PIL import Image
 from collections import OrderedDict
 import numpy as np
@@ -139,10 +137,6 @@ def main(args):
     # Setup a feature folder:
     if rank == 0:
         os.makedirs(args.features_path, exist_ok=True)
-        tmp_shard_dir = os.path.join(args.features_path, "_tmp_hf_latent_shards")
-        if os.path.exists(tmp_shard_dir):
-            shutil.rmtree(tmp_shard_dir)
-        os.makedirs(tmp_shard_dir, exist_ok=True)
     dist.barrier()
 
     # Create model:
@@ -187,8 +181,6 @@ def main(args):
         prefetch_factor=4,
     )
 
-    tmp_shard_dir = os.path.join(args.features_path, "_tmp_hf_latent_shards")
-    rank_shard_path = os.path.join(tmp_shard_dir, f"rank_{rank:05d}.arrow")
     hf_features = Features(
         {
             "feature": Array3D(shape=(4, latent_size, latent_size), dtype="float16"),
@@ -197,7 +189,10 @@ def main(args):
             "sample_id": Value("int64"),
         }
     )
-    shard_writer = ArrowWriter(path=rank_shard_path, features=hf_features)
+
+    all_features = []
+    all_labels = []
+    all_sample_ids = []
 
     train_steps = 0
     for batch in tqdm(loader, total=len(loader), desc=f"Rank {rank}"):
@@ -213,32 +208,25 @@ def main(args):
         x = x.detach().cpu().numpy()    # (bs, 4, 32, 32)
         y = y.detach().cpu().numpy()    # (bs,)
         for i in range(x.shape[0]):
-            # save_num = NUM_SAMPLES * rank + train_steps * local_batch_size + i
             sample_id = train_steps * args.global_batch_size + dist.get_world_size() * \
                 i + rank
-            shard_writer.write(
-                {
-                    "feature": x[i].astype(np.float16, copy=False),
-                    "label": int(y[i]),
-                    "sample_id": int(sample_id),
-                }
-            )
+            all_features.append(x[i].astype(np.float16, copy=False))
+            all_labels.append(int(y[i]))
+            all_sample_ids.append(int(sample_id))
 
         train_steps += 1
 
-    shard_writer.finalize()
-
-    # each rank saves its shard as native Arrow (no format conversion overhead)
     output_dir = os.path.join(args.features_path, args.hf_dataset_name)
     os.makedirs(output_dir, exist_ok=True)
-    shard_ds = Dataset.from_file(rank_shard_path)
+    shard_ds = Dataset.from_dict(
+        {"feature": all_features, "label": all_labels, "sample_id": all_sample_ids},
+        features=hf_features,
+    )
     shard_ds.save_to_disk(os.path.join(output_dir, f"shard_{rank:05d}"))
-    del shard_ds
-    os.remove(rank_shard_path)
+    del shard_ds, all_features, all_labels, all_sample_ids
 
     dist.barrier()
     if rank == 0:
-        os.rmdir(tmp_shard_dir)
         print(f"Saved HF dataset to: {output_dir}")
 
     cleanup()
