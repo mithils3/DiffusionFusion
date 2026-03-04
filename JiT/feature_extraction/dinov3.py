@@ -1,20 +1,18 @@
 import torch
 import torch.distributed as dist
 import os
-import shutil
+import json
 import timm
 from datasets import load_dataset
 from torch.utils.data.distributed import DistributedSampler
 from torch.utils.data import DataLoader
-from datasets import Array3D, Dataset, Features, Value, load_dataset
-from datasets.arrow_writer import ArrowWriter
+from datasets import Array3D, Dataset, Features, Value
 from tqdm import tqdm
 import argparse
 import numpy as np
 
 
 def collate_fn(batch):
-    # batch is list of dicts like {"image": tensor, "label": int, ...}
     images = torch.stack([b["image"] for b in batch], dim=0)
     labels = torch.tensor([b.get("label", -1)
                           for b in batch], dtype=torch.long)
@@ -23,9 +21,10 @@ def collate_fn(batch):
 
 def main(args):
     """
-    Trains a new DiT model.
+    Extracts DINO features and normalizes them to zero mean, unit variance
+    (channel-wise) to match the scale of VAE latents.
     """
-    assert torch.cuda.is_available(), "Training currently requires at least one GPU."
+    assert torch.cuda.is_available(), "Requires at least one GPU."
 
     # Setup DDP:
     dist.init_process_group("nccl")
@@ -40,18 +39,15 @@ def main(args):
         f"Starting rank={rank}, seed={seed}, world_size={dist.get_world_size()}.")
     if rank == 0:
         os.makedirs(args.features_path, exist_ok=True)
-        tmp_shard_dir = os.path.join(args.features_path, "_tmp_hf_latent_shards")
-        if os.path.exists(tmp_shard_dir):
-            shutil.rmtree(tmp_shard_dir)
-        os.makedirs(tmp_shard_dir, exist_ok=True)
     dist.barrier()
+
     model = timm.create_model(
         args.model_name,
         pretrained=True,
         features_only=True,
     ).to(device)
     model = model.eval()
-    
+
     local_batch_size = args.global_batch_size // dist.get_world_size()
     data_config = timm.data.resolve_model_data_config(model)
     transforms = timm.data.create_transform(**data_config, is_training=False)
@@ -81,64 +77,93 @@ def main(args):
         prefetch_factor=4,
     )
 
-    tmp_shard_dir = os.path.join(args.features_path, "_tmp_hf_latent_shards")
-    os.makedirs(tmp_shard_dir, exist_ok=True)
-    rank_shard_path = os.path.join(tmp_shard_dir, f"rank_{rank:05d}.arrow")
-    patches = 256 // 16
+    patches = args.image_size // 16
+
+    # Extract features and accumulate channel-wise stats for normalization
+    all_features = []
+    all_labels = []
+    all_sample_ids = []
+    channel_sum = np.zeros(args.hidden_size, dtype=np.float64)
+    channel_sum_sq = np.zeros(args.hidden_size, dtype=np.float64)
+    pixel_count = 0
+
+    train_steps = 0
+    for batch in tqdm(loader, total=len(loader), desc=f"Rank {rank}"):
+        x = batch["image"].to(device)
+        y = batch["label"].to(device)
+
+        with torch.no_grad():
+            output = model(x)[-1]  # last feature map (B, C, H, W)
+
+        output = output.detach().cpu().float().numpy()
+        y = y.detach().cpu().numpy()
+
+        # Running channel-wise sums: reduce over (B, H, W), keep C
+        channel_sum += output.sum(axis=(0, 2, 3))
+        channel_sum_sq += (output ** 2).sum(axis=(0, 2, 3))
+        pixel_count += output.shape[0] * output.shape[2] * output.shape[3]
+
+        for i in range(output.shape[0]):
+            sample_id = train_steps * args.global_batch_size + dist.get_world_size() * \
+                i + rank
+            all_features.append(output[i])
+            all_labels.append(int(y[i]))
+            all_sample_ids.append(int(sample_id))
+        train_steps += 1
+
+    # All-reduce channel stats across ranks to get global mean/std
+    sum_t = torch.tensor(channel_sum, dtype=torch.float64, device=device)
+    sum_sq_t = torch.tensor(channel_sum_sq, dtype=torch.float64, device=device)
+    count_t = torch.tensor([pixel_count], dtype=torch.float64, device=device)
+    dist.all_reduce(sum_t)
+    dist.all_reduce(sum_sq_t)
+    dist.all_reduce(count_t)
+
+    global_mean = (sum_t / count_t).cpu().numpy()            # (C,)
+    global_std = np.sqrt(
+        (sum_sq_t / count_t).cpu().numpy() - global_mean ** 2
+    )                                                         # (C,)
+
+    # Normalize all features channel-wise: (x - mean) / std
+    mean = global_mean.astype(np.float32).reshape(-1, 1, 1)  # (C, 1, 1)
+    std = global_std.astype(np.float32).reshape(-1, 1, 1)    # (C, 1, 1)
+    for i in range(len(all_features)):
+        all_features[i] = ((all_features[i] - mean) / std).astype(np.float16)
+
+    # Save normalization stats (needed to un-normalize generated DINO features)
+    output_dir = os.path.join(args.features_path, args.hf_dataset_name)
+    os.makedirs(output_dir, exist_ok=True)
+    if rank == 0:
+        stats_path = os.path.join(output_dir, "normalization_stats.json")
+        with open(stats_path, "w") as f:
+            json.dump({"mean": global_mean.tolist(),
+                       "std": global_std.tolist()}, f)
+        print(f"Saved normalization stats to: {stats_path}")
+
+    # Save as HF dataset shard
     hf_features = Features(
         {
             "feature": Array3D(shape=(args.hidden_size, patches, patches), dtype="float16"),
             "label": Value("int64"),
-            # used to restore deterministic global ordering after rank-wise writes
             "sample_id": Value("int64"),
         }
     )
-    shard_writer = ArrowWriter(path=rank_shard_path, features=hf_features)
-
-    train_steps = 0
-    for batch in tqdm(loader, total=len(loader), desc=f"Rank {rank}"):
-        x = batch["image"]
-        y = batch["label"]
-
-        x = x.to(device)
-        y = y.to(device)
-        with torch.no_grad():
-            output = model(x)[-1]  # take last feature map (B, C, H, W)
-        output = output.detach().cpu().numpy()
-        y = y.detach().cpu().numpy()    # (bs,)
-        for i in range(x.shape[0]):
-            # save_num = NUM_SAMPLES * rank + train_steps * local_batch_size + i
-            sample_id = train_steps * args.global_batch_size + dist.get_world_size() * \
-                i + rank
-            shard_writer.write(
-                {
-                    "feature": output[i].astype(np.float16, copy=False),
-                    "label": int(y[i]),
-                    "sample_id": int(sample_id),
-                }
-            )
-        train_steps += 1
-
-    shard_writer.finalize()
-
-    # each rank saves its shard as native Arrow (no format conversion overhead)
-    output_dir = os.path.join(args.features_path, args.hf_dataset_name)
-    os.makedirs(output_dir, exist_ok=True)
-    shard_ds = Dataset.from_file(rank_shard_path)
+    shard_ds = Dataset.from_dict(
+        {"feature": all_features, "label": all_labels,
+            "sample_id": all_sample_ids},
+        features=hf_features,
+    )
     shard_ds.save_to_disk(os.path.join(output_dir, f"shard_{rank:05d}"))
-    del shard_ds
-    os.remove(rank_shard_path)
+    del shard_ds, all_features, all_labels, all_sample_ids
 
     dist.barrier()
     if rank == 0:
-        os.rmdir(tmp_shard_dir)
-        print(f"Saved HF dataset to: {output_dir}")
+        print(f"Saved normalized HF dataset to: {output_dir}")
 
     dist.destroy_process_group()
 
 
 if __name__ == "__main__":
-    # Default args here will train DiT-XL/2 with the hyperparameters we used in our paper (except training iters).
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-path", type=str, required=True)
     parser.add_argument("--features-path", type=str, default="features")
@@ -152,6 +177,5 @@ if __name__ == "__main__":
     parser.add_argument("--model-name", type=str,
                         default="vit_base_patch16_dinov3.lvd1689m")
     parser.add_argument("--hidden-size", type=int, default=768)
-    parser.add_argument("--num-train-steps", type=int, default=100000)
     args = parser.parse_args()
     main(args)
