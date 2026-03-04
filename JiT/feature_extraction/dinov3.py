@@ -6,7 +6,7 @@ import timm
 from datasets import load_dataset
 from torch.utils.data.distributed import DistributedSampler
 from torch.utils.data import DataLoader
-from datasets import Array3D, Dataset, Features, Value
+from datasets import Array3D, Dataset, Features, Value, concatenate_datasets
 from tqdm import tqdm
 import argparse
 import numpy as np
@@ -140,7 +140,8 @@ def main(args):
                        "std": global_std.tolist()}, f)
         print(f"Saved normalization stats to: {stats_path}")
 
-    # Save as HF dataset shard
+    # Save as HF dataset shard.
+    # Arrow offsets overflow at 2GB in from_dict, so build in small chunks.
     hf_features = Features(
         {
             "feature": Array3D(shape=(args.hidden_size, patches, patches), dtype="float16"),
@@ -148,11 +149,19 @@ def main(args):
             "sample_id": Value("int64"),
         }
     )
-    shard_ds = Dataset.from_dict(
-        {"feature": all_features, "label": all_labels,
-            "sample_id": all_sample_ids},
-        features=hf_features,
-    )
+    bytes_per_feature = args.hidden_size * patches * patches * 2  # float16
+    chunk_size = max(1, (2**30) // bytes_per_feature)             # ~1GB per chunk
+    chunks = []
+    for start in range(0, len(all_features), chunk_size):
+        end = start + chunk_size
+        chunk_ds = Dataset.from_dict(
+            {"feature": all_features[start:end],
+             "label": all_labels[start:end],
+             "sample_id": all_sample_ids[start:end]},
+            features=hf_features,
+        )
+        chunks.append(chunk_ds)
+    shard_ds = concatenate_datasets(chunks) if len(chunks) > 1 else chunks[0]
     shard_ds.save_to_disk(os.path.join(output_dir, f"shard_{rank:05d}"))
     del shard_ds, all_features, all_labels, all_sample_ids
 
