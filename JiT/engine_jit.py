@@ -85,7 +85,8 @@ def evaluate(model_without_ddp, args, epoch, vae, batch_size=64, log_writer=None
     world_size = misc.get_world_size()
     local_rank = misc.get_rank()
     num_steps = args.num_images // (batch_size * world_size) + 1
-    eval_image_interval = max(1, getattr(args, "wandb_eval_image_interval", 10))
+    eval_image_interval = max(1, getattr(
+        args, "wandb_eval_image_interval", 10))
     wandb_table = None
     if misc.is_main_process() and wandb_run is not None:
         if wandb is None:
@@ -134,15 +135,17 @@ def evaluate(model_without_ddp, args, epoch, vae, batch_size=64, log_writer=None
         labels_gen = torch.Tensor(labels_gen).long().cuda()
 
         with torch.amp.autocast('cuda', dtype=torch.bfloat16):
-            sampled_images = model_without_ddp.generate(labels_gen)
+            sampled_latents, sampled_dino = model_without_ddp.generate(
+                labels_gen)
 
         torch.distributed.barrier()
 
         print("Decoding step {}/{}".format(step_idx, num_steps))
-        sampled_images = vae.decode(sampled_images / vae.config.scaling_factor).sample
-        sampled_images = torch.clamp(127.5 * sampled_images + 128.0, 0, 255).permute(
+        sampled_latents = vae.decode(
+            sampled_latents / vae.config.scaling_factor).sample
+        sampled_latents = torch.clamp(127.5 * sampled_latents + 128.0, 0, 255).permute(
             0, 2, 3, 1).to("cpu", dtype=torch.uint8).numpy()
-        for sample_idx, sample in enumerate(sampled_images):
+        for sample_idx, sample in enumerate(sampled_latents):
             index = sample_idx + world_size * batch_size * \
                 step_idx + local_rank * batch_size
             if index >= args.num_images:
@@ -156,7 +159,8 @@ def evaluate(model_without_ddp, args, epoch, vae, batch_size=64, log_writer=None
                     epoch,
                     index,
                     class_id,
-                    wandb.Image(sample, caption=f"class={class_id}, idx={index}")
+                    wandb.Image(
+                        sample, caption=f"class={class_id}, idx={index}")
                 )
 
     torch.distributed.barrier()
@@ -202,7 +206,8 @@ def evaluate(model_without_ddp, args, epoch, vae, batch_size=64, log_writer=None
             model_without_ddp.cfg_scale, args.img_size)
         if log_writer is not None:
             log_writer.add_scalar('fid{}'.format(postfix), fid, epoch)
-            log_writer.add_scalar('is{}'.format(postfix), inception_score, epoch)
+            log_writer.add_scalar('is{}'.format(postfix),
+                                  inception_score, epoch)
         if misc.is_main_process() and wandb_run is not None:
             log_payload = {
                 'eval/fid{}'.format(postfix): fid,

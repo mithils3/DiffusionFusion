@@ -43,6 +43,8 @@ def get_args_parser():
                         default=0.0, help='Projection dropout rate')
     parser.add_argument('--vae_pretrained_path', type=str,
                         default='stabilityai/sdxl-vae')
+    parser.add_argument("--dino_hidden_size", type=int, default=768,
+                        help="Hidden size of DINO features (e.g. 768 for DiT-B/2)")
 
     # training
     parser.add_argument('--epochs', default=200, type=int)

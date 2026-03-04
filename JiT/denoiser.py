@@ -13,15 +13,17 @@ class Denoiser(nn.Module):
     ) -> None:
         super().__init__()
         self.net: nn.Module = JiT_models[args.model](
-            input_size=args.img_size,
+            input_size=args.latent_size,
             in_channels=4,
             num_classes=args.class_num,
             attn_drop=args.attn_dropout,
             proj_drop=args.proj_dropout,
         )
-        self.img_size: int = args.img_size
+        self.latent_size: int = args.latent_size
+        self.latent_in_chans: int = 4
         self.num_classes: int = args.class_num
-
+        self.dino_patches = args.dino_patches
+        self.dino_hidden_size = args.dino_hidden_size
         self.label_drop_prob: float = args.label_drop_prob
         self.P_mean: float = args.P_mean
         self.P_std: float = args.P_std
@@ -81,11 +83,11 @@ class Denoiser(nn.Module):
         device = labels.device
         bsz = labels.size(0)
         z_latent = self.noise_scale * \
-            torch.randn(bsz, self.net.in_channels, self.img_size,
-                        self.img_size, device=device)
+            torch.randn(bsz, self.latent_in_chans, self.latent_size,
+                        self.latent_size, device=device)
         z_dino = self.noise_scale * \
-            torch.randn(bsz, self.net.in_channels, self.img_size,
-                        self.img_size, device=device)
+            torch.randn(bsz, self.dino_hidden_size,
+                        self.dino_patches, self.dino_patches, device=device)
         timesteps = torch.linspace(
             0.0, 1.0, self.steps+1, device=device).view(-1, *([1] * z_latent.ndim)).expand(-1, bsz, -1, -1, -1)
 

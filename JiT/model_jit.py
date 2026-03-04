@@ -126,18 +126,30 @@ class Attention(nn.Module):
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
-    def forward(self, x, rope):
+    def forward(self, x, rope, num_patches):
         B, N, C = x.shape
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C //
                                   self.num_heads).permute(2, 0, 3, 1, 4)
-        # make torchscript happy (cannot use tensor as tuple)
         q, k, v = qkv[0], qkv[1], qkv[2]
 
         q = self.q_norm(q)
         k = self.k_norm(k)
 
-        q = rope(q)
-        k = rope(k)
+        # Apply RoPE per-stream: sequence layout is [prefix?, latent, dino]
+        # prefix = in-context tokens (no rotation), latent & dino get same spatial RoPE
+        num_prefix = N - 2 * num_patches
+        q_lat = rope(q[:, :, num_prefix:num_prefix + num_patches])
+        q_dino = rope(q[:, :, num_prefix + num_patches:])
+        k_lat = rope(k[:, :, num_prefix:num_prefix + num_patches])
+        k_dino = rope(k[:, :, num_prefix + num_patches:])
+
+        if num_prefix > 0:
+            q = torch.cat([q[:, :, :num_prefix], q_lat, q_dino], dim=2)
+            k = torch.cat([k[:, :, :num_prefix], k_lat, k_dino], dim=2)
+        else:
+            q = torch.cat([q_lat, q_dino], dim=2)
+            k = torch.cat([k_lat, k_dino], dim=2)
+
         x = torch.nn.functional.scaled_dot_product_attention(
             q, k, v, dropout_p=self.attn_drop.p if self.training else 0.
         )
@@ -193,6 +205,29 @@ class FinalLayer(nn.Module):
         return x
 
 
+class DinoFinalLayer(nn.Module):
+    """
+    The final layer of JiT.
+    """
+
+    def __init__(self, hidden_size, dino_hidden_size, out_channels):
+        super().__init__()
+        self.norm_final = RMSNorm(hidden_size)
+        self.linear = nn.Linear(
+            hidden_size, dino_hidden_size, bias=True)
+        self.adaLN_modulation = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(hidden_size, 2 * hidden_size, bias=True)
+        )
+
+    @torch.compile
+    def forward(self, x, c):
+        shift, scale = self.adaLN_modulation(c).chunk(2, dim=1)
+        x = modulate(self.norm_final(x), shift, scale)
+        x = self.linear(x)
+        return x
+
+
 class JiTBlock(nn.Module):
     def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, attn_drop=0.0, proj_drop=0.0):
         super().__init__()
@@ -208,11 +243,11 @@ class JiTBlock(nn.Module):
         )
 
     @torch.compile
-    def forward(self, x,  c, feat_rope=None):
+    def forward(self, x, c, feat_rope=None, num_patches=0):
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(
             c).chunk(6, dim=-1)
         x = x + gate_msa.unsqueeze(1) * self.attn(
-            modulate(self.norm1(x), shift_msa, scale_msa), rope=feat_rope)
+            modulate(self.norm1(x), shift_msa, scale_msa), rope=feat_rope, num_patches=num_patches)
         x = x + \
             gate_mlp.unsqueeze(
                 1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
@@ -238,7 +273,9 @@ class JiT(nn.Module):
         num_classes=1000,
         bottleneck_dim=128,
         in_context_len=32,
-        in_context_start=8
+        in_context_start=8,
+        dino_hidden_size=768,
+        dino_patches=16,
     ):
         super().__init__()
         self.in_channels = in_channels
@@ -263,7 +300,6 @@ class JiT(nn.Module):
         num_patches = self.x_embedder.num_patches
         self.pos_embed = nn.Parameter(torch.zeros(
             1, num_patches, hidden_size), requires_grad=False)
-
         # in-context cls token
         if self.in_context_len > 0:
             self.in_context_posemb = nn.Parameter(torch.zeros(
@@ -278,11 +314,6 @@ class JiT(nn.Module):
             pt_seq_len=hw_seq_len,
             num_cls_token=0
         )
-        self.feat_rope_incontext = VisionRotaryEmbeddingFast(
-            dim=half_head_dim,
-            pt_seq_len=hw_seq_len,
-            num_cls_token=self.in_context_len
-        )
 
         # transformer
         self.blocks = nn.ModuleList([
@@ -294,9 +325,10 @@ class JiT(nn.Module):
         ])
 
         # linear predict
-        self.final_layer = FinalLayer(
+        self.latent_final_layer = FinalLayer(
             hidden_size, patch_size, self.out_channels)
-
+        self.dino_final_layer = DinoFinalLayer(
+            hidden_size, dino_hidden_size, self.out_channels)
         self.initialize_weights()
 
     def initialize_weights(self):
@@ -333,11 +365,16 @@ class JiT(nn.Module):
             nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
 
         # Zero-out output layers:
-        nn.init.constant_(self.final_layer.adaLN_modulation[-1].weight, 0)
-        nn.init.constant_(self.final_layer.adaLN_modulation[-1].bias, 0)
+        nn.init.constant_(
+            self.latent_final_layer.adaLN_modulation[-1].weight, 0)
+        nn.init.constant_(self.latent_final_layer.adaLN_modulation[-1].bias, 0)
 
-        nn.init.constant_(self.final_layer.linear.weight, 0)
-        nn.init.constant_(self.final_layer.linear.bias, 0)
+        nn.init.constant_(self.latent_final_layer.linear.weight, 0)
+        nn.init.constant_(self.latent_final_layer.linear.bias, 0)
+        nn.init.constant_(self.dino_final_layer.linear.weight, 0)
+        nn.init.constant_(self.dino_final_layer.linear.bias, 0)
+        nn.init.constant_(self.dino_final_layer.adaLN_modulation[-1].weight, 0)
+        nn.init.constant_(self.dino_final_layer.adaLN_modulation[-1].bias, 0)
 
     def unpatchify(self, x, p):
         """
@@ -353,7 +390,7 @@ class JiT(nn.Module):
         imgs = x.reshape(shape=(x.shape[0], c, h * p, h * p))
         return imgs
 
-    def forward(self, x, t, y):
+    def forward(self, latent, dino_features, t, y):
         """
         x: (N, C, H, W)
         t: (N,)
@@ -365,8 +402,15 @@ class JiT(nn.Module):
         c = t_emb + y_emb
 
         # forward JiT
-        x = self.x_embedder(x)
-        x += self.pos_embed
+        latent = self.x_embedder(latent)
+        dino_features = dino_features.flatten(2).transpose(
+            1, 2)  # (N, num_dino_patches, dino_hidden_size)
+        latent += self.pos_embed
+        dino_features += self.pos_embed
+        num_patches = latent.shape[1]
+
+        # concatenate dual streams: [latent, dino]
+        x = torch.cat([latent, dino_features], dim=1)
 
         for i, block in enumerate(self.blocks):
             # in-context
@@ -375,15 +419,17 @@ class JiT(nn.Module):
                     1).repeat(1, self.in_context_len, 1)
                 in_context_tokens += self.in_context_posemb
                 x = torch.cat([in_context_tokens, x], dim=1)
-            x = block(x, c, self.feat_rope if i <
-                      self.in_context_start else self.feat_rope_incontext)
+            x = block(x, c, self.feat_rope, num_patches=num_patches)
 
+        # split back: [in_context?, latent, dino]
         x = x[:, self.in_context_len:]
+        latent, dino_out = x[:, :num_patches], x[:, num_patches:]
 
-        x = self.final_layer(x, c)
-        output = self.unpatchify(x, self.patch_size)
+        latent = self.latent_final_layer(latent, c)
+        dino_out = self.dino_final_layer(dino_out, c)
+        output = self.unpatchify(latent, self.patch_size)
 
-        return output
+        return output, dino_out
 
 
 def JiT_B_16(**kwargs):
@@ -394,21 +440,26 @@ def JiT_B_16(**kwargs):
 def JiT_B_2_4C(**kwargs):
     kwargs.setdefault("input_size", 32)
     return JiT(depth=12, hidden_size=768, num_heads=12,
-               bottleneck_dim=128, in_context_len=32, in_context_start=4, patch_size=2,  **kwargs)
+               bottleneck_dim=128, in_context_len=32, in_context_start=4, patch_size=2, in_channels=4,  **kwargs)
+
 
 def JiT_L_2_4C(**kwargs):
     kwargs.setdefault("input_size", 32)
     return JiT(depth=24, hidden_size=1024, num_heads=16,
                bottleneck_dim=128, in_context_len=32, in_context_start=8, patch_size=2, **kwargs)
 
+
 def JiT_B_4_4C(**kwargs):
     kwargs.setdefault("input_size", 32)
     return JiT(depth=12, hidden_size=768, num_heads=12,
                bottleneck_dim=128, in_context_len=32, in_context_start=4, patch_size=4,  **kwargs)
+
+
 def JiT_L_4_4C(**kwargs):
     kwargs.setdefault("input_size", 32)
     return JiT(depth=24, hidden_size=1024, num_heads=16,
                bottleneck_dim=128, in_context_len=32, in_context_start=8, patch_size=4, **kwargs)
+
 
 def JiT_B_32(**kwargs):
     return JiT(depth=12, hidden_size=768, num_heads=12,
@@ -448,9 +499,11 @@ JiT_models = {
     'JiT-L/4-4C': JiT_L_4_4C,
 }
 if __name__ == "__main__":
-    module = BottleneckPatchEmbed(in_chans=4,img_size=32,patch_size=2).cuda()
-    random_tensor = torch.randn(1, 4, 32, 32).cuda()  # (B, C, H, W)
-    random_t = torch.tensor([0.5]).cuda()  # (B,)
-    random_y = torch.tensor([10]).cuda()  # (B,)
-    output = module(random_tensor)
-    print(output.shape)
+    module = JiT_B_2_4C().cuda()
+    latent = torch.randn(1, 4, 32, 32).cuda()
+    dino = torch.randn(1, 768, 16, 16).cuda()
+    t = torch.tensor([10]).cuda()
+    y = torch.tensor([5]).cuda()
+    with torch.no_grad():
+        output, dino_out = module(latent, dino, t, y)
+        print(output.shape, dino_out.shape)
