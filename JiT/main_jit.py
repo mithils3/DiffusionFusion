@@ -131,7 +131,7 @@ def get_args_parser():
     parser.add_argument('--class_num', default=1000, type=int)
     parser.add_argument('--dino_dir_name', default='imagenet256_dinov3_features', type=str,
                         help='Path to DINO features dataset (HF dataset name or local path)')
-    parser.add_argument('--latent_dir_name', default='imagenet256_vae_features', type=str,
+    parser.add_argument('--latent_dir_name', default='imagenet256_latents', type=str,
                         help='Name for the output HF dataset containing VAE features')
 
     # checkpointing

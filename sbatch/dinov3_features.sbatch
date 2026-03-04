@@ -19,6 +19,7 @@ module load cuda/12.6.1
 
 source /u/msalunkhe/.venv/bin/activate
 cd /u/msalunkhe/DiffusionFusion/JiT
+git pull
 IMAGENET_PATH="timm/mini-imagenet"
 OUTPUT_DIR="/work/nvme/betw/msalunkhe/data/mini-imagenet"
 # Avoid thread explosion across DDP ranks + DataLoader workers.
