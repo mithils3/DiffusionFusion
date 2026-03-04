@@ -231,7 +231,6 @@ def main(args):
     latent_dataset = concatenate_datasets(
         [load_from_disk(shard_dir) for shard_dir in latent_shard_dirs])
     latent_dataset = latent_dataset.sort("sample_id")
-    hf_dataset = load_from_disk(args.data_path)
     dataset_train = CustomDataset(
         latent_dataset=latent_dataset, dino_dataset=dino_dataset)
 
