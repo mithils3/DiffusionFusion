@@ -72,9 +72,10 @@ class Denoiser(nn.Module):
             (1 - t).clamp_min(self.t_eps)
         v_dino_pred = (dino_pred - z_dino) / (1 - t).clamp_min(self.t_eps)
 
-        # l2 loss
-        loss = (v_latent - v_latent_pred) ** 2 + (v_dino - v_dino_pred) ** 2
-        loss = loss.mean(dim=(1, 2, 3)).mean()
+        # l2 loss (separate reduction — streams have different spatial sizes)
+        loss_latent = ((v_latent - v_latent_pred) ** 2).mean()
+        loss_dino = ((v_dino - v_dino_pred) ** 2).mean()
+        loss = loss_latent + loss_dino
 
         return loss
 
