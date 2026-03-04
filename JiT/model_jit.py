@@ -287,6 +287,8 @@ class JiT(nn.Module):
         self.in_context_len = in_context_len
         self.in_context_start = in_context_start
         self.num_classes = num_classes
+        self.dino_hidden_size = dino_hidden_size
+        self.dino_patches = dino_patches
 
         # time and class embed
         self.t_embedder = TimestepEmbedder(hidden_size)
@@ -428,6 +430,9 @@ class JiT(nn.Module):
         latent = self.latent_final_layer(latent, c)
         dino_out = self.dino_final_layer(dino_out, c)
         output = self.unpatchify(latent, self.patch_size)
+        # reshape dino back to spatial: (B, N, C) -> (B, C, H, W)
+        dino_out = dino_out.transpose(1, 2).view(
+            -1, self.dino_hidden_size, self.dino_patches, self.dino_patches)
 
         return output, dino_out
 
