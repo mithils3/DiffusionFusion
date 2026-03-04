@@ -102,7 +102,7 @@ def evaluate(model_without_ddp, args, epoch, vae, batch_size=64, log_writer=None
         args.output_dir,
         "{}-steps{}-cfg{}-interval{}-{}-image{}-res{}".format(
             model_without_ddp.method, model_without_ddp.steps, model_without_ddp.cfg_scale,
-            model_without_ddp.cfg_interval[0], model_without_ddp.cfg_interval[1], args.num_images, args.img_size
+            model_without_ddp.cfg_interval[0], model_without_ddp.cfg_interval[1], args.num_images, args.latent_size
         )
     )
     print("Save to:", save_folder)
@@ -183,12 +183,8 @@ def evaluate(model_without_ddp, args, epoch, vae, batch_size=64, log_writer=None
         torch.distributed.barrier()
 
     if metrics_requested and misc.is_main_process():
-        if args.img_size == 256:
-            fid_statistics_file = 'fid_stats/jit_in256_stats.npz'
-        elif args.img_size == 512:
-            fid_statistics_file = 'fid_stats/jit_in512_stats.npz'
-        else:
-            fid_statistics_file = '/work/nvme/betw/msalunkhe/data/jit_in256_stats.npz'
+        
+        fid_statistics_file = '/work/nvme/betw/msalunkhe/data/jit_in256_stats.npz'
         metrics_dict = torch_fidelity.calculate_metrics(
             input1=save_folder,
             input2=None,
@@ -203,7 +199,7 @@ def evaluate(model_without_ddp, args, epoch, vae, batch_size=64, log_writer=None
         fid = metrics_dict['frechet_inception_distance']
         inception_score = metrics_dict['inception_score_mean']
         postfix = "_cfg{}_res{}".format(
-            model_without_ddp.cfg_scale, args.img_size)
+            model_without_ddp.cfg_scale, args.latent_size)
         if log_writer is not None:
             log_writer.add_scalar('fid{}'.format(postfix), fid, epoch)
             log_writer.add_scalar('is{}'.format(postfix),
