@@ -141,7 +141,7 @@ def get_args_parser():
                         help='Folder that contains checkpoint to resume from')
     parser.add_argument('--save_last_freq', type=int, default=5,
                         help='Frequency (in epochs) to save checkpoints')
-    parser.add_argument('--log_freq', default=100, type=int)
+    parser.add_argument('--log_freq', default=5, type=int)
     parser.add_argument('--use_wandb', action='store_true',
                         help='Enable Weights & Biases logging')
     parser.add_argument('--no_use_wandb', action='store_false', dest='use_wandb',
