@@ -23,7 +23,7 @@ git pull
 IMAGENET_PATH="/work/nvme/betw/msalunkhe/data/mini-imagenet/"
 OUTPUT_DIR="/work/nvme/betw/msalunkhe/outputs/jit_base_patch_size_2_dino_latent_naive"
 rm -rf  ${OUTPUT_DIR}
-TORCHDYNAMO_DISABLE=1 torchrun --nproc_per_node=auto --nnodes=1 --node_rank=0 \
+torchrun --nproc_per_node=auto --nnodes=1 --node_rank=0 \
 main_jit.py \
 --model JiT-B/2-4C \
 --proj_dropout 0.0 \
@@ -33,4 +33,4 @@ main_jit.py \
 --epochs 900 --warmup_epochs 5 \
 --gen_bsz  128 --num_images 10000 --cfg 2.9 --interval_min 0.1 --interval_max 1.0 \
 --output_dir ${OUTPUT_DIR} --resume ${OUTPUT_DIR} \
---data_path ${IMAGENET_PATH} --online_eval --num_workers 2 --class_num 100
+--data_path ${IMAGENET_PATH} --online_eval --num_workers 12 --class_num 100

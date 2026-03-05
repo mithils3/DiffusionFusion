@@ -287,6 +287,10 @@ def main(args):
     )
     model_without_ddp = model.module
 
+    # Compile the full DDP model for training only;
+    # eval uses model_without_ddp (uncompiled) to avoid dynamic-shape issues.
+    compiled_model = torch.compile(model)
+
     # Set up optimizer with weight decay adjustment for bias and norm layers
     param_groups = misc.add_weight_decay(model_without_ddp, args.weight_decay)
     optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.95))
@@ -349,7 +353,7 @@ def main(args):
             sampler_train.set_epoch(epoch)
 
             train_one_epoch(
-                model,
+                compiled_model,
                 model_without_ddp,
                 data_loader_train,
                 optimizer,
