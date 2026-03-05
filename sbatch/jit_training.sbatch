@@ -33,4 +33,4 @@ main_jit.py \
 --epochs 900 --warmup_epochs 5 \
 --gen_bsz  128 --num_images 10000 --cfg 2.9 --interval_min 0.1 --interval_max 1.0 \
 --output_dir ${OUTPUT_DIR} --resume ${OUTPUT_DIR} \
---data_path ${IMAGENET_PATH} --online_eval --num_workers 12 --class_num 100
+--data_path ${IMAGENET_PATH} --online_eval --num_workers 16 --class_num 100
