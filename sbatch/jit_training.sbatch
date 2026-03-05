@@ -5,7 +5,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
-#SBATCH --gpus-per-node=4
+#SBATCH --gpus-per-node=2
 #SBATCH --mem=256G
 #SBATCH --time=48:00:00
 #SBATCH -o slurm-%j.out
@@ -23,9 +23,9 @@ git pull
 IMAGENET_PATH="/work/nvme/betw/msalunkhe/data/mini-imagenet/"
 OUTPUT_DIR="/work/nvme/betw/msalunkhe/outputs/jit_base_patch_size_2_dino_latent_naive"
 rm -rf  ${OUTPUT_DIR}
-OMP_NUM_THREADS=32 torchrun --nproc_per_node=auto --nnodes=1 --node_rank=0 \
+torchrun --nproc_per_node=auto --nnodes=1 --node_rank=0 \
 main_jit.py \
---model JiT_B_2_4C \
+--model JiT-B/2-4C \
 --proj_dropout 0.0 \
     --P_mean -0.8 --P_std 0.8 \
     --noise_scale 0.7 \
@@ -33,4 +33,4 @@ main_jit.py \
 --epochs 300 --warmup_epochs 5 \
 --gen_bsz  128 --num_images 10000 --cfg 2.9 --interval_min 0.1 --interval_max 1.0 \
 --output_dir ${OUTPUT_DIR} --resume ${OUTPUT_DIR} \
---data_path ${IMAGENET_PATH} --online_eval --num_workers 8 --class_num 100
+--data_path ${IMAGENET_PATH} --online_eval --num_workers 2 --class_num 100
