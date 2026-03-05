@@ -23,7 +23,7 @@ git pull
 IMAGENET_PATH="/work/nvme/betw/msalunkhe/data/mini-imagenet/"
 OUTPUT_DIR="/work/nvme/betw/msalunkhe/outputs/jit_base_patch_size_2_dino_latent_naive"
 rm -rf  ${OUTPUT_DIR}
-torchrun --nproc_per_node=auto --nnodes=1 --node_rank=0 \
+TORCHDYNAMO_DISABLE=1 torchrun --nproc_per_node=auto --nnodes=1 --node_rank=0 \
 main_jit.py \
 --model JiT-B/2-4C \
 --proj_dropout 0.0 \
