@@ -5,7 +5,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
-#SBATCH --gpus-per-node=2
+#SBATCH --gpus-per-node=4
 #SBATCH --mem=256G
 #SBATCH --time=48:00:00
 #SBATCH -o slurm-%j.out
@@ -30,7 +30,7 @@ main_jit.py \
     --P_mean -0.8 --P_std 0.8 \
     --noise_scale 0.7 \
 --batch_size 256 --blr 5e-5 \
---epochs 300 --warmup_epochs 5 \
+--epochs 900 --warmup_epochs 5 \
 --gen_bsz  128 --num_images 10000 --cfg 2.9 --interval_min 0.1 --interval_max 1.0 \
 --output_dir ${OUTPUT_DIR} --resume ${OUTPUT_DIR} \
 --data_path ${IMAGENET_PATH} --online_eval --num_workers 2 --class_num 100
