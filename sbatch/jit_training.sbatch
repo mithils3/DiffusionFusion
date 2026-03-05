@@ -4,7 +4,7 @@
 #SBATCH -p ghx4
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=32
+#SBATCH --cpus-per-task=16
 #SBATCH --gpus-per-node=2
 #SBATCH --mem=256G
 #SBATCH --time=48:00:00
@@ -31,6 +31,6 @@ main_jit.py \
     --noise_scale 0.7 \
 --batch_size 128 --blr 5e-5 \
 --epochs 900 --warmup_epochs 5 \
---gen_bsz  128 --num_images 10000 --cfg 2.9 --interval_min 0.1 --interval_max 1.0 \
+--gen_bsz  128 --num_images 5000 --cfg 2.9 --interval_min 0.1 --interval_max 1.0 \
 --output_dir ${OUTPUT_DIR} --resume ${OUTPUT_DIR} \
 --data_path ${IMAGENET_PATH} --online_eval --num_workers 32 --class_num 100 --eval_freq 100
