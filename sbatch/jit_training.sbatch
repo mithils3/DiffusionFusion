@@ -29,7 +29,7 @@ main_jit.py \
 --proj_dropout 0.0 \
     --P_mean -0.8 --P_std 0.8 \
     --noise_scale 0.7 \
---batch_size 256 --blr 5e-5 \
+--batch_size 128 --blr 5e-5 \
 --epochs 900 --warmup_epochs 5 \
 --gen_bsz  128 --num_images 10000 --cfg 2.9 --interval_min 0.1 --interval_max 1.0 \
 --output_dir ${OUTPUT_DIR} --resume ${OUTPUT_DIR} \
