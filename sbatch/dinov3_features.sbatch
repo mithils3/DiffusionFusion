@@ -15,7 +15,7 @@ set -euo pipefail
 
 
 module load python/3.11.9
-module load cuda/12.6.1
+module load cuda/12.9.0
 
 source /u/msalunkhe/.venv/bin/activate
 cd /u/msalunkhe/DiffusionFusion/JiT

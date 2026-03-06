@@ -15,7 +15,7 @@ set -euo pipefail
 
 
 module load python/3.11.9
-module load cuda/12.6.1
+module load cuda/12.9.0
 
 source /u/msalunkhe/.venv/bin/activate
 cd /u/msalunkhe/DiffusionFusion/JiT
@@ -23,7 +23,7 @@ git pull
 IMAGENET_PATH="/work/nvme/betw/msalunkhe/data/mini-imagenet/"
 OUTPUT_DIR="/work/nvme/betw/msalunkhe/outputs/jit_base_patch_size_2_dino_latent_naive"
 rm -rf  ${OUTPUT_DIR}
-OMP_NUM_THREADS=32 torchrun --nproc_per_node=auto --nnodes=1 --node_rank=0 \
+OMP_NUM_THREADS=16 torchrun --nproc_per_node=auto --nnodes=1 --node_rank=0 \
 main_jit.py \
 --model JiT-B/2-4C \
 --proj_dropout 0.0 \
@@ -33,4 +33,4 @@ main_jit.py \
 --epochs 900 --warmup_epochs 5 \
 --gen_bsz  128 --num_images 5000 --cfg 2.9 --interval_min 0.1 --interval_max 1.0 \
 --output_dir ${OUTPUT_DIR} --resume ${OUTPUT_DIR} \
---data_path ${IMAGENET_PATH} --online_eval --num_workers 32 --class_num 100 --eval_freq 100
+--data_path ${IMAGENET_PATH} --online_eval --num_workers 16 --class_num 100 --eval_freq 100
