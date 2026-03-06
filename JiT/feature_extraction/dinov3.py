@@ -19,6 +19,27 @@ def collate_fn(batch):
     return {"image": images, "label": labels}
 
 
+def compute_samples_per_shard(shape, max_shard_size_mb):
+    bytes_per_sample = int(np.prod(shape)) * np.dtype(np.float16).itemsize
+    shard_bytes = max_shard_size_mb * 1024 * 1024
+    return max(1, shard_bytes // max(bytes_per_sample, 1))
+
+
+def save_feature_shard(output_dir, shard_name, features, labels, sample_ids, hf_features):
+    shard_dir = os.path.join(output_dir, shard_name)
+    os.makedirs(shard_dir, exist_ok=True)
+    shard_ds = Dataset.from_dict(
+        {
+            "feature": features,
+            "label": labels,
+            "sample_id": sample_ids,
+        },
+        features=hf_features,
+    )
+    shard_ds.save_to_disk(shard_dir)
+    del shard_ds
+
+
 def main(args):
     """
     Extracts DINO features and normalizes them to zero mean, unit variance
@@ -79,37 +100,36 @@ def main(args):
 
     patches = args.image_size // 16
 
-    # Extract features and accumulate channel-wise stats for normalization
-    all_features = []
-    all_labels = []
-    all_sample_ids = []
+    output_dir = os.path.join(args.features_path, args.hf_dataset_name)
+    os.makedirs(output_dir, exist_ok=True)
+    hf_features = Features(
+        {
+            "feature": Array3D(shape=(args.hidden_size, patches, patches), dtype="float16"),
+            "label": Value("int64"),
+            "sample_id": Value("int64"),
+        }
+    )
+    samples_per_shard = compute_samples_per_shard(
+        (args.hidden_size, patches, patches), args.max_shard_size_mb)
+    print(f"Rank {rank}: writing approximately {samples_per_shard} samples per shard.")
+
+    # Pass 1: compute global channel-wise stats without retaining features in RAM.
     channel_sum = np.zeros(args.hidden_size, dtype=np.float64)
     channel_sum_sq = np.zeros(args.hidden_size, dtype=np.float64)
     pixel_count = 0
 
-    train_steps = 0
-    for batch in tqdm(loader, total=len(loader), desc=f"Rank {rank}"):
+    for batch in tqdm(loader, total=len(loader), desc=f"Rank {rank} [stats]"):
         x = batch["image"].to(device)
-        y = batch["label"].to(device)
 
         with torch.no_grad():
             output = model(x)[-1]  # last feature map (B, C, H, W)
 
         output = output.detach().cpu().float().numpy()
-        y = y.detach().cpu().numpy()
 
         # Running channel-wise sums: reduce over (B, H, W), keep C
         channel_sum += output.sum(axis=(0, 2, 3))
         channel_sum_sq += (output ** 2).sum(axis=(0, 2, 3))
         pixel_count += output.shape[0] * output.shape[2] * output.shape[3]
-
-        for i in range(output.shape[0]):
-            sample_id = train_steps * args.global_batch_size + dist.get_world_size() * \
-                i + rank
-            all_features.append(output[i])
-            all_labels.append(int(y[i]))
-            all_sample_ids.append(int(sample_id))
-        train_steps += 1
 
     # All-reduce channel stats across ranks to get global mean/std
     sum_t = torch.tensor(channel_sum, dtype=torch.float64, device=device)
@@ -123,16 +143,10 @@ def main(args):
     global_std = np.sqrt(
         (sum_sq_t / count_t).cpu().numpy() - global_mean ** 2
     )                                                         # (C,)
-
-    # Normalize all features channel-wise: (x - mean) / std
     mean = global_mean.astype(np.float32).reshape(-1, 1, 1)  # (C, 1, 1)
     std = global_std.astype(np.float32).reshape(-1, 1, 1)    # (C, 1, 1)
-    for i in range(len(all_features)):
-        all_features[i] = ((all_features[i] - mean) / std).astype(np.float16)
 
     # Save normalization stats (needed to un-normalize generated DINO features)
-    output_dir = os.path.join(args.features_path, args.hf_dataset_name)
-    os.makedirs(output_dir, exist_ok=True)
     if rank == 0:
         stats_path = os.path.join(output_dir, "normalization_stats.json")
         with open(stats_path, "w") as f:
@@ -140,30 +154,58 @@ def main(args):
                        "std": global_std.tolist()}, f)
         print(f"Saved normalization stats to: {stats_path}")
 
-    # Save as HF dataset shard.
-    # Arrow offsets overflow at 2GB in from_dict, so build in small chunks.
-    hf_features = Features(
-        {
-            "feature": Array3D(shape=(args.hidden_size, patches, patches), dtype="float16"),
-            "label": Value("int64"),
-            "sample_id": Value("int64"),
-        }
-    )
-    bytes_per_feature = args.hidden_size * patches * patches * 2  # float16
-    chunk_size = max(1, (2**30) // bytes_per_feature)             # ~1GB per chunk
-    chunks = []
-    for start in range(0, len(all_features), chunk_size):
-        end = start + chunk_size
-        chunk_ds = Dataset.from_dict(
-            {"feature": all_features[start:end],
-             "label": all_labels[start:end],
-             "sample_id": all_sample_ids[start:end]},
-            features=hf_features,
+    # Pass 2: recompute features, normalize on the fly, and write small HF shards.
+    dist.barrier()
+    feature_buf = []
+    label_buf = []
+    sample_id_buf = []
+    shard_idx = 0
+    local_sample_idx = 0
+    rank_sample_offset = rank * len(sampler)
+
+    for batch in tqdm(loader, total=len(loader), desc=f"Rank {rank} [write]"):
+        x = batch["image"].to(device)
+        y = batch["label"].cpu().numpy()
+
+        with torch.no_grad():
+            output = model(x)[-1]  # last feature map (B, C, H, W)
+
+        output = output.detach().cpu().float().numpy()
+        output = ((output - mean) / std).astype(np.float16)
+
+        for i in range(output.shape[0]):
+            sample_id = rank_sample_offset + local_sample_idx
+            feature_buf.append(output[i])
+            label_buf.append(int(y[i]))
+            sample_id_buf.append(int(sample_id))
+            local_sample_idx += 1
+
+            if len(feature_buf) >= samples_per_shard:
+                shard_name = f"shard_{rank:05d}_{shard_idx:05d}"
+                save_feature_shard(
+                    output_dir=output_dir,
+                    shard_name=shard_name,
+                    features=feature_buf,
+                    labels=label_buf,
+                    sample_ids=sample_id_buf,
+                    hf_features=hf_features,
+                )
+                feature_buf = []
+                label_buf = []
+                sample_id_buf = []
+                shard_idx += 1
+
+    if feature_buf:
+        shard_name = f"shard_{rank:05d}_{shard_idx:05d}"
+        save_feature_shard(
+            output_dir=output_dir,
+            shard_name=shard_name,
+            features=feature_buf,
+            labels=label_buf,
+            sample_ids=sample_id_buf,
+            hf_features=hf_features,
         )
-        chunks.append(chunk_ds)
-    shard_ds = concatenate_datasets(chunks) if len(chunks) > 1 else chunks[0]
-    shard_ds.save_to_disk(os.path.join(output_dir, f"shard_{rank:05d}"))
-    del shard_ds, all_features, all_labels, all_sample_ids
+    del feature_buf, label_buf, sample_id_buf
 
     dist.barrier()
     if rank == 0:
@@ -182,9 +224,10 @@ if __name__ == "__main__":
     parser.add_argument("--global-seed", type=int, default=0)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--hf-dataset-name", type=str,
-                        default="imagenet256_latents")
+                        default="imagenet256_dinov3_features")
     parser.add_argument("--model-name", type=str,
                         default="vit_base_patch16_dinov3.lvd1689m")
     parser.add_argument("--hidden-size", type=int, default=768)
+    parser.add_argument("--max-shard-size-mb", type=int, default=1024)
     args = parser.parse_args()
     main(args)

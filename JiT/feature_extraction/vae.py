@@ -116,6 +116,27 @@ def collate_fn(batch):
     return {"image": images, "label": labels}
 
 
+def compute_samples_per_shard(shape, max_shard_size_mb):
+    bytes_per_sample = int(np.prod(shape)) * np.dtype(np.float16).itemsize
+    shard_bytes = max_shard_size_mb * 1024 * 1024
+    return max(1, shard_bytes // max(bytes_per_sample, 1))
+
+
+def save_feature_shard(output_dir, shard_name, features, labels, sample_ids, hf_features):
+    shard_dir = os.path.join(output_dir, shard_name)
+    os.makedirs(shard_dir, exist_ok=True)
+    shard_ds = Dataset.from_dict(
+        {
+            "feature": features,
+            "label": labels,
+            "sample_id": sample_ids,
+        },
+        features=hf_features,
+    )
+    shard_ds.save_to_disk(shard_dir)
+    del shard_ds
+
+
 def main(args):
     """
     Trains a new DiT model.
@@ -190,11 +211,17 @@ def main(args):
         }
     )
 
-    all_features = []
-    all_labels = []
-    all_sample_ids = []
+    samples_per_shard = compute_samples_per_shard(
+        (4, latent_size, latent_size), args.max_shard_size_mb)
+    print(f"Rank {rank}: writing approximately {samples_per_shard} samples per shard.")
 
-    train_steps = 0
+    feature_buf = []
+    label_buf = []
+    sample_id_buf = []
+    shard_idx = 0
+    local_sample_idx = 0
+    rank_sample_offset = rank * len(sampler)
+
     for batch in tqdm(loader, total=len(loader), desc=f"Rank {rank}"):
         x = batch["image"]
         y = batch["label"]
@@ -208,22 +235,40 @@ def main(args):
         x = x.detach().cpu().numpy()    # (bs, 4, 32, 32)
         y = y.detach().cpu().numpy()    # (bs,)
         for i in range(x.shape[0]):
-            sample_id = train_steps * args.global_batch_size + dist.get_world_size() * \
-                i + rank
-            all_features.append(x[i].astype(np.float16, copy=False))
-            all_labels.append(int(y[i]))
-            all_sample_ids.append(int(sample_id))
+            sample_id = rank_sample_offset + local_sample_idx
+            feature_buf.append(x[i].astype(np.float16, copy=False))
+            label_buf.append(int(y[i]))
+            sample_id_buf.append(int(sample_id))
+            local_sample_idx += 1
 
-        train_steps += 1
+            if len(feature_buf) >= samples_per_shard:
+                shard_name = f"shard_{rank:05d}_{shard_idx:05d}"
+                save_feature_shard(
+                    output_dir=os.path.join(args.features_path, args.hf_dataset_name),
+                    shard_name=shard_name,
+                    features=feature_buf,
+                    labels=label_buf,
+                    sample_ids=sample_id_buf,
+                    hf_features=hf_features,
+                )
+                feature_buf = []
+                label_buf = []
+                sample_id_buf = []
+                shard_idx += 1
 
     output_dir = os.path.join(args.features_path, args.hf_dataset_name)
     os.makedirs(output_dir, exist_ok=True)
-    shard_ds = Dataset.from_dict(
-        {"feature": all_features, "label": all_labels, "sample_id": all_sample_ids},
-        features=hf_features,
-    )
-    shard_ds.save_to_disk(os.path.join(output_dir, f"shard_{rank:05d}"))
-    del shard_ds, all_features, all_labels, all_sample_ids
+    if feature_buf:
+        shard_name = f"shard_{rank:05d}_{shard_idx:05d}"
+        save_feature_shard(
+            output_dir=output_dir,
+            shard_name=shard_name,
+            features=feature_buf,
+            labels=label_buf,
+            sample_ids=sample_id_buf,
+            hf_features=hf_features,
+        )
+    del feature_buf, label_buf, sample_id_buf
 
     dist.barrier()
     if rank == 0:
@@ -243,5 +288,6 @@ if __name__ == "__main__":
     parser.add_argument("--global-seed", type=int, default=0)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--hf-dataset-name", type=str, default="imagenet256_latents")
+    parser.add_argument("--max-shard-size-mb", type=int, default=1024)
     args = parser.parse_args()
     main(args)

@@ -182,6 +182,47 @@ def collate_fn(batch):
     return {"image": images, "label": labels}
 
 
+def load_feature_dataset(data_path, dataset_dir_name, dtype=np.float16):
+    shard_dirs = sorted(glob(os.path.join(data_path, dataset_dir_name, "shard_*")))
+    if not shard_dirs:
+        raise FileNotFoundError(
+            f"No shard directories found under {os.path.join(data_path, dataset_dir_name)}"
+        )
+
+    shard_datasets = [load_from_disk(shard_dir) for shard_dir in shard_dirs]
+    sample_id_is_monotonic = True
+    prev_last_sample_id = None
+    for shard_dir, shard_dataset in zip(shard_dirs, shard_datasets):
+        if len(shard_dataset) == 0:
+            continue
+        first_sample_id = int(shard_dataset[0]["sample_id"])
+        last_sample_id = int(shard_dataset[len(shard_dataset) - 1]["sample_id"])
+        if first_sample_id > last_sample_id:
+            sample_id_is_monotonic = False
+            print(
+                f"Shard {shard_dir} has descending sample_id order; will sort after concatenation."
+            )
+            break
+        if prev_last_sample_id is not None and first_sample_id <= prev_last_sample_id:
+            sample_id_is_monotonic = False
+            print(
+                f"Shard {shard_dir} overlaps or regresses in sample_id order; will sort after concatenation."
+            )
+            break
+        prev_last_sample_id = last_sample_id
+
+    dataset = concatenate_datasets(shard_datasets)
+    if sample_id_is_monotonic:
+        print(f"{dataset_dir_name}: sample_id order already monotonic across shards, skipping sort.")
+    else:
+        print(f"{dataset_dir_name}: applying sort('sample_id') to restore deterministic alignment.")
+        dataset = dataset.sort("sample_id")
+    dataset = dataset.with_format(
+        "numpy", columns=["feature"], output_all_columns=True, dtype=dtype
+    )
+    return dataset
+
+
 def main(args):
     misc.init_distributed_mode(args)
     print('Job directory:', os.path.dirname(os.path.realpath(__file__)))
@@ -221,16 +262,10 @@ def main(args):
         )
 
     # Data augmentation transforms
-    dino_shard_dirs = sorted(
-        glob(os.path.join(args.data_path, args.dino_dir_name, "shard_*")))
-    dino_dataset = concatenate_datasets(
-        [load_from_disk(shard_dir) for shard_dir in dino_shard_dirs])
-    dino_dataset = dino_dataset.sort("sample_id")
-    latent_shard_dirs = sorted(
-        glob(os.path.join(args.data_path, args.latent_dir_name, "shard_*")))
-    latent_dataset = concatenate_datasets(
-        [load_from_disk(shard_dir) for shard_dir in latent_shard_dirs])
-    latent_dataset = latent_dataset.sort("sample_id")
+    dino_dataset = load_feature_dataset(
+        args.data_path, args.dino_dir_name, dtype=np.float16)
+    latent_dataset = load_feature_dataset(
+        args.data_path, args.latent_dir_name, dtype=np.float16)
     dataset_train = CustomDataset(
         latent_dataset=latent_dataset, dino_dataset=dino_dataset)
 
