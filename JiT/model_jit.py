@@ -294,6 +294,8 @@ class JiT(nn.Module):
         # linear embed
         self.x_embedder = BottleneckPatchEmbed(
             input_size, patch_size, in_channels, bottleneck_dim, hidden_size, bias=True)
+        self.dino_embedder = nn.Identity() if dino_hidden_size == hidden_size else nn.Linear(
+            dino_hidden_size, hidden_size, bias=True)
 
         # use fixed sin-cos embedding
         num_patches = self.x_embedder.num_patches
@@ -351,6 +353,10 @@ class JiT(nn.Module):
         w2 = self.x_embedder.proj2.weight.data
         nn.init.xavier_uniform_(w2.view([w2.shape[0], -1]))
         nn.init.constant_(self.x_embedder.proj2.bias, 0)
+        if isinstance(self.dino_embedder, nn.Linear):
+            wd = self.dino_embedder.weight.data
+            nn.init.xavier_uniform_(wd.view([wd.shape[0], -1]))
+            nn.init.constant_(self.dino_embedder.bias, 0)
 
         # Initialize label embedding table:
         nn.init.normal_(self.y_embedder.embedding_table.weight, std=0.02)
@@ -404,6 +410,12 @@ class JiT(nn.Module):
         latent = self.x_embedder(latent)
         dino_features = dino_features.flatten(2).transpose(
             1, 2)  # (N, num_dino_patches, dino_hidden_size)
+        if dino_features.shape[1] != latent.shape[1]:
+            raise ValueError(
+                f"DINO patch grid ({dino_features.shape[1]} tokens) must match latent patch grid "
+                f"({latent.shape[1]} tokens). Check `dino_patches`, `input_size`, and `patch_size`."
+            )
+        dino_features = self.dino_embedder(dino_features)
         latent += self.pos_embed
         dino_features += self.pos_embed
         num_patches = latent.shape[1]
