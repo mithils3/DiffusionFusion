@@ -82,7 +82,7 @@ def get_args_parser():
                         help='Keep DataLoader workers alive across epochs')
     parser.add_argument('--no_persistent_workers',
                         action='store_false', dest='persistent_workers')
-    parser.set_defaults(persistent_workers=True)
+    parser.set_defaults(persistent_workers=False)
     parser.add_argument('--pin_mem', action='store_true',
                         help='Pin CPU memory in DataLoader for faster GPU transfers')
     parser.add_argument('--no_pin_mem', action='store_false', dest='pin_mem')
