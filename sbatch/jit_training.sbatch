@@ -20,8 +20,8 @@ module load cuda/12.9.0
 source /u/msalunkhe/.venv/bin/activate
 cd /u/msalunkhe/DiffusionFusion/JiT
 git pull
-IMAGENET_PATH="/work/nvme/betw/msalunkhe/data/mini-imagenet/"
-OUTPUT_DIR="/work/nvme/betw/msalunkhe/outputs/jit_large_patch_size_2_dino_latent_naive"
+IMAGENET_PATH="/work/hdd/bgnp/msalunkhe/data/imagenet/"
+OUTPUT_DIR="/work/nvme/bgnp/msalunkhe/outputs/jit_large_patch_size_2_dino_latent_naive"
 rm -rf  ${OUTPUT_DIR}
 OMP_NUM_THREADS=16 torchrun \
 --nproc_per_node=auto \
@@ -33,11 +33,11 @@ main_jit.py \
 --P_mean -0.8 \
 --P_std 0.8 \
 --noise_scale 1.0 \
---batch_size 64 \
+--batch_size 128 \
 --blr 5e-5 \
---epochs 900 \
+--epochs 200 \
 --warmup_epochs 5 \
---gen_bsz 64 \
+--gen_bsz 128 \
 --num_images 5000 \
 --cfg 2.9 \
 --interval_min 0.1 \
