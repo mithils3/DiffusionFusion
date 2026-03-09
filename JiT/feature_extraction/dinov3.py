@@ -228,6 +228,6 @@ if __name__ == "__main__":
     parser.add_argument("--model-name", type=str,
                         default="vit_base_patch16_dinov3.lvd1689m")
     parser.add_argument("--hidden-size", type=int, default=768)
-    parser.add_argument("--max-shard-size-mb", type=int, default=1024)
+    parser.add_argument("--max-shard-size-mb", type=int, default=4096)
     args = parser.parse_args()
     main(args)
