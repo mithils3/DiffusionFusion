@@ -46,8 +46,8 @@ main_jit.py \
 --resume ${OUTPUT_DIR} \
 --data_path ${IMAGENET_PATH} \
 --online_eval \
---num_workers 12 \
+--num_workers 2 \
 --persistent_workers \
---prefetch_factor 4 \
+--prefetch_factor 6 \
 --class_num 1000 \
 --eval_freq 25
