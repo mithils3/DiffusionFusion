@@ -27,7 +27,7 @@ def train_one_epoch(model, model_without_ddp, data_loader, optimizer, device, ep
     header = 'Epoch: [{}]'.format(epoch)
     print_freq = 20
 
-    optimizer.zero_grad()
+    optimizer.zero_grad(set_to_none=True)
 
     if log_writer is not None:
         print('log_dir: {}'.format(log_writer.log_dir))
@@ -49,7 +49,7 @@ def train_one_epoch(model, model_without_ddp, data_loader, optimizer, device, ep
             print("Loss is {}, stopping training".format(loss_value))
             sys.exit(1)
 
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
         loss.backward()
         optimizer.step()
 

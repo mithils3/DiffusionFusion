@@ -33,7 +33,7 @@ main_jit.py \
 --P_mean -0.8 \
 --P_std 0.8 \
 --noise_scale 1.0 \
---batch_size 64 \
+--batch_size 96 \
 --blr 5e-5 \
 --epochs 200 \
 --warmup_epochs 5 \
@@ -46,6 +46,8 @@ main_jit.py \
 --resume ${OUTPUT_DIR} \
 --data_path ${IMAGENET_PATH} \
 --online_eval \
---num_workers 8 \
+--num_workers 16 \
+--persistent_workers \
+--prefetch_factor 8 \
 --class_num 1000 \
 --eval_freq 100

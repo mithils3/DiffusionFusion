@@ -14,7 +14,7 @@ import wandb
 
 from util.crop import center_crop_arr, transform
 import util.misc as misc
-from util.dataset import CustomDataset
+from util.dataset import CustomDataset, ShardAwareSampler
 import copy
 from engine_jit import train_one_epoch, evaluate
 from denoiser import Denoiser
@@ -211,16 +211,20 @@ def load_feature_dataset(data_path, dataset_dir_name, dtype=np.float16):
             break
         prev_last_sample_id = last_sample_id
 
+    shard_sizes = [len(ds) for ds in shard_datasets]
     dataset = concatenate_datasets(shard_datasets)
     if sample_id_is_monotonic:
         print(f"{dataset_dir_name}: sample_id order already monotonic across shards, skipping sort.")
     else:
         print(f"{dataset_dir_name}: applying sort('sample_id') to restore deterministic alignment.")
         dataset = dataset.sort("sample_id")
+        # After sorting, shard boundaries no longer correspond to contiguous
+        # regions, so fall back to treating the whole dataset as one shard.
+        shard_sizes = [len(dataset)]
     dataset = dataset.with_format(
         "numpy", columns=["feature"], output_all_columns=True, dtype=dtype
     )
-    return dataset
+    return dataset, shard_sizes
 
 
 def main(args):
@@ -262,18 +266,23 @@ def main(args):
         )
 
     # Data augmentation transforms
-    dino_dataset = load_feature_dataset(
+    dino_dataset, dino_shard_sizes = load_feature_dataset(
         args.data_path, args.dino_dir_name, dtype=np.float16)
-    latent_dataset = load_feature_dataset(
+    latent_dataset, latent_shard_sizes = load_feature_dataset(
         args.data_path, args.latent_dir_name, dtype=np.float16)
     dataset_train = CustomDataset(
         latent_dataset=latent_dataset, dino_dataset=dino_dataset)
 
-    sampler_train = torch.utils.data.DistributedSampler(
-        dataset_train,
+    # Use shard-aware sampler: shuffles shard order each epoch but reads
+    # sequentially within each shard to avoid random HDD seeks.
+    # Use latent shard sizes as the canonical boundaries (both datasets
+    # are aligned by sample_id so their shard sizes should match).
+    sampler_train = ShardAwareSampler(
+        shard_sizes=latent_shard_sizes,
         num_replicas=num_tasks,
         rank=global_rank,
-        shuffle=True,
+        shuffle_shards=True,
+        shuffle_within_shards=False,
         drop_last=True,
     )
 

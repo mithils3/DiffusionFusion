@@ -164,8 +164,6 @@ class Denoiser(nn.Module):
     @torch.no_grad()
     def update_ema(self) -> None:
         assert self.ema_params1 is not None and self.ema_params2 is not None
-        source_params = list(self.parameters())
-        for targ, src in zip(self.ema_params1, source_params):
-            targ.detach().mul_(self.ema_decay1).add_(src, alpha=1 - self.ema_decay1)
-        for targ, src in zip(self.ema_params2, source_params):
-            targ.detach().mul_(self.ema_decay2).add_(src, alpha=1 - self.ema_decay2)
+        for targ1, targ2, src in zip(self.ema_params1, self.ema_params2, self.parameters()):
+            targ1.detach().mul_(self.ema_decay1).add_(src, alpha=1 - self.ema_decay1)
+            targ2.detach().mul_(self.ema_decay2).add_(src, alpha=1 - self.ema_decay2)
