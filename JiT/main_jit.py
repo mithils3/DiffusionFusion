@@ -8,18 +8,19 @@ from pathlib import Path
 import torch
 import torch.backends.cudnn as cudnn
 from torch.utils.tensorboard import SummaryWriter
-import torchvision.transforms as transforms
-import torchvision.datasets as datasets
 import wandb
 
-from util.crop import center_crop_arr, transform
 import util.misc as misc
-from util.dataset import CustomDataset, ShardAwareSampler
+from util.dataset import (
+    CustomDataset,
+    RamLoadedShardDataset,
+    ShardAwareSampler,
+    inspect_feature_shards,
+    load_feature_dataset,
+)
 import copy
 from engine_jit import train_one_epoch, evaluate
 from denoiser import Denoiser
-from datasets import load_from_disk, concatenate_datasets
-from glob import glob
 from diffusers.models import AutoencoderKL
 
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -87,6 +88,10 @@ def get_args_parser():
                         help='Pin CPU memory in DataLoader for faster GPU transfers')
     parser.add_argument('--no_pin_mem', action='store_false', dest='pin_mem')
     parser.set_defaults(pin_mem=True)
+    parser.add_argument('--load_shards_to_ram', action='store_true',
+                        help='Load one logical shard pair per rank fully into RAM and train on it before moving on')
+    parser.add_argument('--no_load_shards_to_ram', action='store_false', dest='load_shards_to_ram')
+    parser.set_defaults(load_shards_to_ram=False)
     parser.add_argument('--ddp_bucket_cap_mb', default=100, type=int,
                         help='DDP gradient bucket size in MB')
     parser.add_argument('--ddp_broadcast_buffers', action='store_true',
@@ -173,60 +178,6 @@ def get_args_parser():
 
     return parser
 
-
-def collate_fn(batch):
-    # batch is list of dicts like {"image": tensor, "label": int, ...}
-    images = torch.stack([b["image"] for b in batch], dim=0)
-    labels = torch.tensor([b.get("label", -1)
-                          for b in batch], dtype=torch.long)
-    return {"image": images, "label": labels}
-
-
-def load_feature_dataset(data_path, dataset_dir_name, dtype=np.float16):
-    shard_dirs = sorted(glob(os.path.join(data_path, dataset_dir_name, "shard_*")))
-    if not shard_dirs:
-        raise FileNotFoundError(
-            f"No shard directories found under {os.path.join(data_path, dataset_dir_name)}"
-        )
-
-    shard_datasets = [load_from_disk(shard_dir) for shard_dir in shard_dirs]
-    sample_id_is_monotonic = True
-    prev_last_sample_id = None
-    for shard_dir, shard_dataset in zip(shard_dirs, shard_datasets):
-        if len(shard_dataset) == 0:
-            continue
-        first_sample_id = int(shard_dataset[0]["sample_id"])
-        last_sample_id = int(shard_dataset[len(shard_dataset) - 1]["sample_id"])
-        if first_sample_id > last_sample_id:
-            sample_id_is_monotonic = False
-            print(
-                f"Shard {shard_dir} has descending sample_id order; will sort after concatenation."
-            )
-            break
-        if prev_last_sample_id is not None and first_sample_id <= prev_last_sample_id:
-            sample_id_is_monotonic = False
-            print(
-                f"Shard {shard_dir} overlaps or regresses in sample_id order; will sort after concatenation."
-            )
-            break
-        prev_last_sample_id = last_sample_id
-
-    shard_sizes = [len(ds) for ds in shard_datasets]
-    dataset = concatenate_datasets(shard_datasets)
-    if sample_id_is_monotonic:
-        print(f"{dataset_dir_name}: sample_id order already monotonic across shards, skipping sort.")
-    else:
-        print(f"{dataset_dir_name}: applying sort('sample_id') to restore deterministic alignment.")
-        dataset = dataset.sort("sample_id")
-        # After sorting, shard boundaries no longer correspond to contiguous
-        # regions, so fall back to treating the whole dataset as one shard.
-        shard_sizes = [len(dataset)]
-    dataset = dataset.with_format(
-        "numpy", columns=["feature"], output_all_columns=True, dtype=dtype
-    )
-    return dataset, shard_sizes
-
-
 def main(args):
     misc.init_distributed_mode(args)
     print('Job directory:', os.path.dirname(os.path.realpath(__file__)))
@@ -265,39 +216,82 @@ def main(args):
             mode=args.wandb_mode,
         )
 
-    # Data augmentation transforms
-    dino_dataset, dino_shard_sizes = load_feature_dataset(
-        args.data_path, args.dino_dir_name, dtype=np.float16)
-    latent_dataset, latent_shard_sizes = load_feature_dataset(
-        args.data_path, args.latent_dir_name, dtype=np.float16)
-    dataset_train = CustomDataset(
-        latent_dataset=latent_dataset, dino_dataset=dino_dataset)
+    if args.load_shards_to_ram:
+        latent_store = inspect_feature_shards(args.data_path, args.latent_dir_name)
+        dino_store = inspect_feature_shards(args.data_path, args.dino_dir_name)
+        dataset_train = RamLoadedShardDataset(
+            latent_store=latent_store,
+            dino_store=dino_store,
+            batch_size=args.batch_size,
+            num_replicas=num_tasks,
+            rank=global_rank,
+            shuffle_shards=True,
+            seed=args.seed,
+        )
+        data_loader_train = torch.utils.data.DataLoader(
+            dataset=dataset_train,
+            batch_size=None,
+            num_workers=0,
+            pin_memory=args.pin_mem,
+        )
+        epoch_control = dataset_train
 
-    # Use shard-aware sampler: shuffles shard order each epoch but reads
-    # sequentially within each shard to avoid random HDD seeks.
-    # Use latent shard sizes as the canonical boundaries (both datasets
-    # are aligned by sample_id so their shard sizes should match).
-    sampler_train = ShardAwareSampler(
-        shard_sizes=latent_shard_sizes,
-        num_replicas=num_tasks,
-        rank=global_rank,
-        shuffle_shards=True,
-        shuffle_within_shards=False,
-        drop_last=True,
-    )
+        if global_rank == 0:
+            plan = dataset_train.describe_current_plan()
+            max_shard_samples = max(span.size for span in dataset_train.logical_shards)
+            approx_max_ram_bytes = max_shard_samples * (
+                latent_store.bytes_per_sample + dino_store.bytes_per_sample
+            )
+            if args.num_workers > 0:
+                print(
+                    "RAM shard loading ignores DataLoader workers and forces num_workers=0."
+                )
+            print(
+                "RAM shard loading enabled using "
+                f"{plan['logical_shard_count']} logical shards from {plan['logical_shard_source']}."
+            )
+            print(
+                "Approx max per-rank shard working set: "
+                f"{approx_max_ram_bytes / (1024 ** 3):.2f} GiB."
+            )
+            print(
+                "Epoch 0 steps per rank: "
+                f"{plan['num_batches']} "
+                f"(samples/rank={plan['num_samples_per_rank']}, "
+                f"dropped_tail_per_rank={plan['dropped_samples_per_rank']})."
+            )
+    else:
+        dino_dataset, _dino_shard_sizes = load_feature_dataset(
+            args.data_path, args.dino_dir_name, dtype=np.float16)
+        latent_dataset, latent_shard_sizes = load_feature_dataset(
+            args.data_path, args.latent_dir_name, dtype=np.float16)
+        dataset_train = CustomDataset(
+            latent_dataset=latent_dataset, dino_dataset=dino_dataset)
 
-    loader_kwargs = dict(
-        dataset=dataset_train,
-        batch_size=args.batch_size,
-        sampler=sampler_train,
-        num_workers=args.num_workers,
-        pin_memory=args.pin_mem,
-        drop_last=True,
-    )
-    if args.num_workers > 0:
-        loader_kwargs["prefetch_factor"] = args.prefetch_factor
-        loader_kwargs["persistent_workers"] = args.persistent_workers
-    data_loader_train = torch.utils.data.DataLoader(**loader_kwargs)
+        # Use shard-aware sampler: shuffles shard order each epoch but reads
+        # sequentially within each shard to avoid random HDD seeks.
+        sampler_train = ShardAwareSampler(
+            shard_sizes=latent_shard_sizes,
+            num_replicas=num_tasks,
+            rank=global_rank,
+            shuffle_shards=True,
+            shuffle_within_shards=False,
+            drop_last=True,
+        )
+
+        loader_kwargs = dict(
+            dataset=dataset_train,
+            batch_size=args.batch_size,
+            sampler=sampler_train,
+            num_workers=args.num_workers,
+            pin_memory=args.pin_mem,
+            drop_last=True,
+        )
+        if args.num_workers > 0:
+            loader_kwargs["prefetch_factor"] = args.prefetch_factor
+            loader_kwargs["persistent_workers"] = args.persistent_workers
+        data_loader_train = torch.utils.data.DataLoader(**loader_kwargs)
+        epoch_control = sampler_train
 
     torch._dynamo.config.cache_size_limit = 128
     torch._dynamo.config.optimize_ddp = False
@@ -392,9 +386,11 @@ def main(args):
         # Training loop
         print(f"Start training for {args.epochs} epochs")
         start_time = time.time()
-        steps_per_epoch = len(data_loader_train)
         for epoch in range(args.start_epoch, args.epochs):
-            sampler_train.set_epoch(epoch)
+            epoch_control.set_epoch(epoch)
+            steps_per_epoch = len(data_loader_train)
+            if steps_per_epoch <= 0:
+                raise RuntimeError("Training dataloader has zero steps for this epoch.")
 
             train_one_epoch(
                 compiled_model,
