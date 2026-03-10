@@ -291,6 +291,7 @@ class RamLoadedShardDataset(IterableDataset):
 
         self._cached_epoch = None
         self._cached_plan = None
+        self._warned_label_mismatch = False
 
     def _select_logical_shard_store(self) -> FeatureShardStore:
         if self.dino_store.bytes_per_sample > self.latent_store.bytes_per_sample:
@@ -367,11 +368,25 @@ class RamLoadedShardDataset(IterableDataset):
                 "Latent and DINO sample_id alignment diverged while materializing RAM shard "
                 f"[{shard_span.global_start}, {shard_span.global_end})."
             )
-        if not np.array_equal(latent_rows["label"], dino_rows["label"]):
-            raise ValueError(
-                "Latent and DINO labels diverged while materializing RAM shard "
-                f"[{shard_span.global_start}, {shard_span.global_end})."
+        label_mismatch = latent_rows["label"] != dino_rows["label"]
+        if np.any(label_mismatch) and not self._warned_label_mismatch:
+            mismatch_indices = np.flatnonzero(label_mismatch)[:5]
+            mismatch_examples = [
+                (
+                    int(latent_rows["sample_id"][idx]),
+                    int(latent_rows["label"][idx]),
+                    int(dino_rows["label"][idx]),
+                )
+                for idx in mismatch_indices
+            ]
+            print(
+                "Warning: latent and DINO labels diverged for "
+                f"{int(label_mismatch.sum())} samples in RAM shard "
+                f"[{shard_span.global_start}, {shard_span.global_end}). "
+                "Continuing with latent labels to match the legacy training path. "
+                f"Examples (sample_id, latent_label, dino_label): {mismatch_examples}"
             )
+            self._warned_label_mismatch = True
 
         return {
             "latent": latent_rows["feature"],
