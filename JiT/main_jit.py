@@ -92,6 +92,10 @@ def get_args_parser():
                         help='Load one logical shard pair per rank fully into RAM and train on it before moving on')
     parser.add_argument('--no_load_shards_to_ram', action='store_false', dest='load_shards_to_ram')
     parser.set_defaults(load_shards_to_ram=False)
+    parser.add_argument('--ram_shard_prefetch', action='store_true',
+                        help='While one RAM-loaded shard is training, preload the next shard in a background thread')
+    parser.add_argument('--no_ram_shard_prefetch', action='store_false', dest='ram_shard_prefetch')
+    parser.set_defaults(ram_shard_prefetch=True)
     parser.add_argument('--ddp_bucket_cap_mb', default=100, type=int,
                         help='DDP gradient bucket size in MB')
     parser.add_argument('--ddp_broadcast_buffers', action='store_true',
@@ -227,6 +231,7 @@ def main(args):
             rank=global_rank,
             shuffle_shards=True,
             seed=args.seed,
+            preload_next_shard=args.ram_shard_prefetch,
         )
         data_loader_train = torch.utils.data.DataLoader(
             dataset=dataset_train,
@@ -242,6 +247,9 @@ def main(args):
             approx_max_ram_bytes = max_shard_samples * (
                 latent_store.bytes_per_sample + dino_store.bytes_per_sample
             )
+            approx_peak_ram_bytes = (
+                approx_max_ram_bytes * 2 if args.ram_shard_prefetch else approx_max_ram_bytes
+            )
             if args.num_workers > 0:
                 print(
                     "RAM shard loading ignores DataLoader workers and forces num_workers=0."
@@ -254,6 +262,11 @@ def main(args):
                 "Approx max per-rank shard working set: "
                 f"{approx_max_ram_bytes / (1024 ** 3):.2f} GiB."
             )
+            if args.ram_shard_prefetch:
+                print(
+                    "RAM shard prefetch enabled: peak per-rank working set can temporarily reach about "
+                    f"{approx_peak_ram_bytes / (1024 ** 3):.2f} GiB while the next shard is staged."
+                )
             print(
                 "Epoch 0 steps per rank: "
                 f"{plan['num_batches']} "

@@ -2,9 +2,10 @@ import gc
 import math
 import os
 from bisect import bisect_right
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from glob import glob
-from typing import Dict, List
+from typing import Dict, Iterator, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -255,6 +256,7 @@ class RamLoadedShardDataset(IterableDataset):
         rank: int = -1,
         shuffle_shards: bool = True,
         seed: int = 0,
+        preload_next_shard: bool = True,
     ):
         if num_replicas < 0:
             num_replicas = dist.get_world_size() if dist.is_initialized() else 1
@@ -276,6 +278,7 @@ class RamLoadedShardDataset(IterableDataset):
         self.rank = rank
         self.shuffle_shards = shuffle_shards
         self.seed = seed
+        self.preload_next_shard = preload_next_shard
         self.epoch = 0
 
         self.logical_shard_store = self._select_logical_shard_store()
@@ -394,6 +397,45 @@ class RamLoadedShardDataset(IterableDataset):
             "y": latent_rows["label"],
         }
 
+    def _iter_rank_shards(
+        self, shard_indices: List[int]
+    ) -> Iterator[Tuple[LogicalShardSpan, Dict[str, np.ndarray]]]:
+        if not shard_indices:
+            return
+
+        if not self.preload_next_shard or len(shard_indices) == 1:
+            for shard_idx in shard_indices:
+                shard_span = self.logical_shards[shard_idx]
+                yield shard_span, self._load_logical_shard(shard_span)
+            return
+
+        executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix=f"ram-shard-prefetch-r{self.rank}",
+        )
+        pending_future: Optional[Future] = None
+        try:
+            first_span = self.logical_shards[shard_indices[0]]
+            pending_future = executor.submit(self._load_logical_shard, first_span)
+
+            for idx, shard_idx in enumerate(shard_indices):
+                shard_span = self.logical_shards[shard_idx]
+                current_future = pending_future
+                if current_future is None:
+                    raise RuntimeError("RAM shard prefetcher lost track of the current shard future.")
+
+                if idx + 1 < len(shard_indices):
+                    next_span = self.logical_shards[shard_indices[idx + 1]]
+                    pending_future = executor.submit(self._load_logical_shard, next_span)
+                else:
+                    pending_future = None
+
+                yield shard_span, current_future.result()
+        finally:
+            if pending_future is not None:
+                pending_future.cancel()
+            executor.shutdown(wait=True, cancel_futures=True)
+
     def __iter__(self):
         worker_info = torch.utils.data.get_worker_info()
         if worker_info is not None:
@@ -406,63 +448,67 @@ class RamLoadedShardDataset(IterableDataset):
         emitted_samples = 0
         carry_batch = None
 
-        for shard_idx in plan["shard_indices_by_rank"][self.rank]:
-            if emitted_samples >= target_samples:
-                break
+        shard_iter = self._iter_rank_shards(plan["shard_indices_by_rank"][self.rank])
+        try:
+            for _shard_span, shard_rows in shard_iter:
+                if emitted_samples >= target_samples:
+                    break
 
-            shard_span = self.logical_shards[shard_idx]
-            shard_rows = self._load_logical_shard(shard_span)
-            shard_size = shard_rows["y"].shape[0]
-            cursor = 0
+                shard_size = shard_rows["y"].shape[0]
+                cursor = 0
 
-            if carry_batch is not None:
-                needed = self.batch_size - carry_batch["y"].shape[0]
-                take = min(needed, shard_size)
-                carry_batch = {
-                    "latent": np.concatenate(
-                        [carry_batch["latent"], shard_rows["latent"][:take]], axis=0
-                    ),
-                    "dino": np.concatenate(
-                        [carry_batch["dino"], shard_rows["dino"][:take]], axis=0
-                    ),
-                    "y": np.concatenate(
-                        [carry_batch["y"], shard_rows["y"][:take]], axis=0
-                    ),
-                }
-                cursor = take
-                if carry_batch["y"].shape[0] == self.batch_size:
+                if carry_batch is not None:
+                    needed = self.batch_size - carry_batch["y"].shape[0]
+                    take = min(needed, shard_size)
+                    carry_batch = {
+                        "latent": np.concatenate(
+                            [carry_batch["latent"], shard_rows["latent"][:take]], axis=0
+                        ),
+                        "dino": np.concatenate(
+                            [carry_batch["dino"], shard_rows["dino"][:take]], axis=0
+                        ),
+                        "y": np.concatenate(
+                            [carry_batch["y"], shard_rows["y"][:take]], axis=0
+                        ),
+                    }
+                    cursor = take
+                    if carry_batch["y"].shape[0] == self.batch_size:
+                        yield {
+                            "latent": torch.from_numpy(carry_batch["latent"]),
+                            "dino": torch.from_numpy(carry_batch["dino"]),
+                            "y": torch.from_numpy(carry_batch["y"]),
+                        }
+                        emitted_samples += self.batch_size
+                        carry_batch = None
+
+                while (
+                    cursor + self.batch_size <= shard_size
+                    and emitted_samples + self.batch_size <= target_samples
+                ):
+                    batch_slice = slice(cursor, cursor + self.batch_size)
                     yield {
-                        "latent": torch.from_numpy(carry_batch["latent"]),
-                        "dino": torch.from_numpy(carry_batch["dino"]),
-                        "y": torch.from_numpy(carry_batch["y"]),
+                        "latent": torch.from_numpy(shard_rows["latent"][batch_slice]),
+                        "dino": torch.from_numpy(shard_rows["dino"][batch_slice]),
+                        "y": torch.from_numpy(shard_rows["y"][batch_slice]),
                     }
                     emitted_samples += self.batch_size
-                    carry_batch = None
+                    cursor += self.batch_size
 
-            while (
-                cursor + self.batch_size <= shard_size
-                and emitted_samples + self.batch_size <= target_samples
-            ):
-                batch_slice = slice(cursor, cursor + self.batch_size)
-                yield {
-                    "latent": torch.from_numpy(shard_rows["latent"][batch_slice]),
-                    "dino": torch.from_numpy(shard_rows["dino"][batch_slice]),
-                    "y": torch.from_numpy(shard_rows["y"][batch_slice]),
-                }
-                emitted_samples += self.batch_size
-                cursor += self.batch_size
+                if emitted_samples < target_samples and cursor < shard_size:
+                    max_leftover = min(shard_size - cursor, target_samples - emitted_samples)
+                    carry_slice = slice(cursor, cursor + max_leftover)
+                    carry_batch = {
+                        "latent": np.array(shard_rows["latent"][carry_slice], copy=True),
+                        "dino": np.array(shard_rows["dino"][carry_slice], copy=True),
+                        "y": np.array(shard_rows["y"][carry_slice], copy=True),
+                    }
 
-            if emitted_samples < target_samples and cursor < shard_size:
-                max_leftover = min(shard_size - cursor, target_samples - emitted_samples)
-                carry_slice = slice(cursor, cursor + max_leftover)
-                carry_batch = {
-                    "latent": np.array(shard_rows["latent"][carry_slice], copy=True),
-                    "dino": np.array(shard_rows["dino"][carry_slice], copy=True),
-                    "y": np.array(shard_rows["y"][carry_slice], copy=True),
-                }
-
-            del shard_rows
-            gc.collect()
+                del shard_rows
+                gc.collect()
+        finally:
+            close_fn = getattr(shard_iter, "close", None)
+            if close_fn is not None:
+                close_fn()
 
         if carry_batch is not None:
             raise RuntimeError(
