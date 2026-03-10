@@ -1,5 +1,4 @@
 import gc
-import math
 import os
 from bisect import bisect_right
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -10,76 +9,14 @@ from typing import Dict, Iterator, List, Optional, Tuple
 import numpy as np
 import torch
 import torch.distributed as dist
-from datasets import concatenate_datasets, load_from_disk
-from torch.utils.data import Dataset, IterableDataset, Sampler
-
-
-class CustomDataset(Dataset):
-    def __init__(self, latent_dataset, dino_dataset):
-        self.latent_dataset = latent_dataset
-        self.dino_dataset = dino_dataset
-
-    def __len__(self):
-        return len(self.latent_dataset)
-
-    def __getitem__(self, idx):
-        latent = torch.as_tensor(self.latent_dataset[idx]["feature"])
-        dino = torch.as_tensor(self.dino_dataset[idx]["feature"])
-        label = torch.tensor(self.latent_dataset[idx]["label"]).long()
-        return {"latent": latent, "dino": dino, "y": label}
+from datasets import load_from_disk
+from torch.utils.data import IterableDataset
 
 
 def resolve_feature_dataset_root(data_path: str, dataset_dir_name: str) -> str:
     if os.path.isdir(dataset_dir_name):
         return dataset_dir_name
     return os.path.join(data_path, dataset_dir_name)
-
-
-def load_feature_dataset(data_path, dataset_dir_name, dtype=np.float16):
-    dataset_root = resolve_feature_dataset_root(data_path, dataset_dir_name)
-    shard_dirs = sorted(glob(os.path.join(dataset_root, "shard_*")))
-    if not shard_dirs:
-        raise FileNotFoundError(
-            f"No shard directories found under {dataset_root}"
-        )
-
-    shard_datasets = [load_from_disk(shard_dir) for shard_dir in shard_dirs]
-    sample_id_is_monotonic = True
-    prev_last_sample_id = None
-    for shard_dir, shard_dataset in zip(shard_dirs, shard_datasets):
-        if len(shard_dataset) == 0:
-            continue
-        first_sample_id = int(shard_dataset[0]["sample_id"])
-        last_sample_id = int(shard_dataset[len(shard_dataset) - 1]["sample_id"])
-        if first_sample_id > last_sample_id:
-            sample_id_is_monotonic = False
-            print(
-                f"Shard {shard_dir} has descending sample_id order; will sort after concatenation."
-            )
-            break
-        if prev_last_sample_id is not None and first_sample_id <= prev_last_sample_id:
-            sample_id_is_monotonic = False
-            print(
-                f"Shard {shard_dir} overlaps or regresses in sample_id order; will sort after concatenation."
-            )
-            break
-        prev_last_sample_id = last_sample_id
-
-    shard_sizes = [len(ds) for ds in shard_datasets]
-    dataset = concatenate_datasets(shard_datasets)
-    if sample_id_is_monotonic:
-        print(f"{dataset_dir_name}: sample_id order already monotonic across shards, skipping sort.")
-    else:
-        print(f"{dataset_dir_name}: applying sort('sample_id') to restore deterministic alignment.")
-        dataset = dataset.sort("sample_id")
-        # After sorting, shard boundaries no longer correspond to contiguous
-        # regions, so fall back to treating the whole dataset as one shard.
-        shard_sizes = [len(dataset)]
-    dataset = dataset.with_format(
-        "numpy", columns=["feature"], output_all_columns=True, dtype=dtype
-    )
-    return dataset, shard_sizes
-
 
 @dataclass(frozen=True)
 class DatasetShardSpan:
@@ -528,88 +465,3 @@ class RamLoadedShardDataset(IterableDataset):
         self.epoch = epoch
         self._cached_epoch = None
         self._cached_plan = None
-
-
-class ShardAwareSampler(Sampler):
-    """Distributed sampler that shuffles shard order but reads sequentially
-    within each shard. This produces a much more sequential disk access
-    pattern than a fully-random permutation, which is critical when
-    the dataset lives on HDD.
-
-    Each epoch:
-      1. Shuffle the order of shards (all ranks see the same order).
-      2. Optionally shuffle indices within each shard (default: off for HDD).
-      3. Distribute indices across ranks via interleaving.
-    """
-
-    def __init__(
-        self,
-        shard_sizes: List[int],
-        num_replicas: int = -1,
-        rank: int = -1,
-        shuffle_shards: bool = True,
-        shuffle_within_shards: bool = False,
-        seed: int = 0,
-        drop_last: bool = True,
-    ):
-        if num_replicas < 0:
-            num_replicas = dist.get_world_size() if dist.is_initialized() else 1
-        if rank < 0:
-            rank = dist.get_rank() if dist.is_initialized() else 0
-
-        self.shard_sizes = shard_sizes
-        self.num_replicas = num_replicas
-        self.rank = rank
-        self.shuffle_shards = shuffle_shards
-        self.shuffle_within_shards = shuffle_within_shards
-        self.seed = seed
-        self.drop_last = drop_last
-        self.epoch = 0
-
-        # Precompute shard start offsets in the concatenated dataset.
-        self.shard_offsets = []
-        offset = 0
-        for size in shard_sizes:
-            self.shard_offsets.append(offset)
-            offset += size
-        self.total_size = offset
-
-        # Per-replica sample count (mirrors DistributedSampler logic).
-        if self.drop_last:
-            self.num_samples = self.total_size // self.num_replicas
-        else:
-            self.num_samples = math.ceil(self.total_size / self.num_replicas)
-
-    def __iter__(self):
-        g = torch.Generator()
-        g.manual_seed(self.seed + self.epoch)
-
-        num_shards = len(self.shard_sizes)
-        if self.shuffle_shards:
-            shard_order = torch.randperm(num_shards, generator=g).tolist()
-        else:
-            shard_order = list(range(num_shards))
-
-        indices = []
-        for shard_idx in shard_order:
-            offset = self.shard_offsets[shard_idx]
-            size = self.shard_sizes[shard_idx]
-            if self.shuffle_within_shards:
-                within = torch.randperm(size, generator=g).tolist()
-                indices.extend(offset + w for w in within)
-            else:
-                indices.extend(range(offset, offset + size))
-
-        # Distribute across ranks via interleaving (same as DistributedSampler).
-        indices = indices[self.rank :: self.num_replicas]
-
-        if self.drop_last:
-            indices = indices[: self.num_samples]
-
-        return iter(indices)
-
-    def __len__(self):
-        return self.num_samples
-
-    def set_epoch(self, epoch: int):
-        self.epoch = epoch

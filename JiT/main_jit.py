@@ -12,11 +12,8 @@ import wandb
 
 import util.misc as misc
 from util.dataset import (
-    CustomDataset,
     RamLoadedShardDataset,
-    ShardAwareSampler,
     inspect_feature_shards,
-    load_feature_dataset,
 )
 import copy
 from engine_jit import train_one_epoch, evaluate
@@ -76,22 +73,10 @@ def get_args_parser():
     parser.add_argument('--seed', default=0, type=int)
     parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
                         help='Starting epoch')
-    parser.add_argument('--num_workers', default=64, type=int)
-    parser.add_argument('--prefetch_factor', default=4, type=int,
-                        help='Number of batches each worker preloads')
-    parser.add_argument('--persistent_workers', action='store_true',
-                        help='Keep DataLoader workers alive across epochs')
-    parser.add_argument('--no_persistent_workers',
-                        action='store_false', dest='persistent_workers')
-    parser.set_defaults(persistent_workers=False)
     parser.add_argument('--pin_mem', action='store_true',
                         help='Pin CPU memory in DataLoader for faster GPU transfers')
     parser.add_argument('--no_pin_mem', action='store_false', dest='pin_mem')
     parser.set_defaults(pin_mem=True)
-    parser.add_argument('--load_shards_to_ram', action='store_true',
-                        help='Load one logical shard pair per rank fully into RAM and train on it before moving on')
-    parser.add_argument('--no_load_shards_to_ram', action='store_false', dest='load_shards_to_ram')
-    parser.set_defaults(load_shards_to_ram=False)
     parser.add_argument('--ram_shard_prefetch', action='store_true',
                         help='While one RAM-loaded shard is training, preload the next shard in a background thread')
     parser.add_argument('--no_ram_shard_prefetch', action='store_false', dest='ram_shard_prefetch')
@@ -220,91 +205,54 @@ def main(args):
             mode=args.wandb_mode,
         )
 
-    if args.load_shards_to_ram:
-        latent_store = inspect_feature_shards(args.data_path, args.latent_dir_name)
-        dino_store = inspect_feature_shards(args.data_path, args.dino_dir_name)
-        dataset_train = RamLoadedShardDataset(
-            latent_store=latent_store,
-            dino_store=dino_store,
-            batch_size=args.batch_size,
-            num_replicas=num_tasks,
-            rank=global_rank,
-            shuffle_shards=True,
-            seed=args.seed,
-            preload_next_shard=args.ram_shard_prefetch,
-        )
-        data_loader_train = torch.utils.data.DataLoader(
-            dataset=dataset_train,
-            batch_size=None,
-            num_workers=0,
-            pin_memory=args.pin_mem,
-        )
-        epoch_control = dataset_train
+    latent_store = inspect_feature_shards(args.data_path, args.latent_dir_name)
+    dino_store = inspect_feature_shards(args.data_path, args.dino_dir_name)
+    dataset_train = RamLoadedShardDataset(
+        latent_store=latent_store,
+        dino_store=dino_store,
+        batch_size=args.batch_size,
+        num_replicas=num_tasks,
+        rank=global_rank,
+        shuffle_shards=True,
+        seed=args.seed,
+        preload_next_shard=args.ram_shard_prefetch,
+    )
+    data_loader_train = torch.utils.data.DataLoader(
+        dataset=dataset_train,
+        batch_size=None,
+        num_workers=0,
+        pin_memory=args.pin_mem,
+    )
+    epoch_control = dataset_train
 
-        if global_rank == 0:
-            plan = dataset_train.describe_current_plan()
-            max_shard_samples = max(span.size for span in dataset_train.logical_shards)
-            approx_max_ram_bytes = max_shard_samples * (
-                latent_store.bytes_per_sample + dino_store.bytes_per_sample
-            )
-            approx_peak_ram_bytes = (
-                approx_max_ram_bytes * 2 if args.ram_shard_prefetch else approx_max_ram_bytes
-            )
-            if args.num_workers > 0:
-                print(
-                    "RAM shard loading ignores DataLoader workers and forces num_workers=0."
-                )
-            print(
-                "RAM shard loading enabled using "
-                f"{plan['logical_shard_count']} logical shards from {plan['logical_shard_source']}."
-            )
-            print(
-                "Approx max per-rank shard working set: "
-                f"{approx_max_ram_bytes / (1024 ** 3):.2f} GiB."
-            )
-            if args.ram_shard_prefetch:
-                print(
-                    "RAM shard prefetch enabled: peak per-rank working set can temporarily reach about "
-                    f"{approx_peak_ram_bytes / (1024 ** 3):.2f} GiB while the next shard is staged."
-                )
-            print(
-                "Epoch 0 steps per rank: "
-                f"{plan['num_batches']} "
-                f"(samples/rank={plan['num_samples_per_rank']}, "
-                f"dropped_tail_per_rank={plan['dropped_samples_per_rank']})."
-            )
-    else:
-        dino_dataset, _dino_shard_sizes = load_feature_dataset(
-            args.data_path, args.dino_dir_name, dtype=np.float16)
-        latent_dataset, latent_shard_sizes = load_feature_dataset(
-            args.data_path, args.latent_dir_name, dtype=np.float16)
-        dataset_train = CustomDataset(
-            latent_dataset=latent_dataset, dino_dataset=dino_dataset)
-
-        # Use shard-aware sampler: shuffles shard order each epoch but reads
-        # sequentially within each shard to avoid random HDD seeks.
-        sampler_train = ShardAwareSampler(
-            shard_sizes=latent_shard_sizes,
-            num_replicas=num_tasks,
-            rank=global_rank,
-            shuffle_shards=True,
-            shuffle_within_shards=False,
-            drop_last=True,
+    if global_rank == 0:
+        plan = dataset_train.describe_current_plan()
+        max_shard_samples = max(span.size for span in dataset_train.logical_shards)
+        approx_max_ram_bytes = max_shard_samples * (
+            latent_store.bytes_per_sample + dino_store.bytes_per_sample
         )
-
-        loader_kwargs = dict(
-            dataset=dataset_train,
-            batch_size=args.batch_size,
-            sampler=sampler_train,
-            num_workers=args.num_workers,
-            pin_memory=args.pin_mem,
-            drop_last=True,
+        approx_peak_ram_bytes = (
+            approx_max_ram_bytes * 2 if args.ram_shard_prefetch else approx_max_ram_bytes
         )
-        if args.num_workers > 0:
-            loader_kwargs["prefetch_factor"] = args.prefetch_factor
-            loader_kwargs["persistent_workers"] = args.persistent_workers
-        data_loader_train = torch.utils.data.DataLoader(**loader_kwargs)
-        epoch_control = sampler_train
+        print(
+            "RAM shard loading enabled using "
+            f"{plan['logical_shard_count']} logical shards from {plan['logical_shard_source']}."
+        )
+        print(
+            "Approx max per-rank shard working set: "
+            f"{approx_max_ram_bytes / (1024 ** 3):.2f} GiB."
+        )
+        if args.ram_shard_prefetch:
+            print(
+                "RAM shard prefetch enabled: peak per-rank working set can temporarily reach about "
+                f"{approx_peak_ram_bytes / (1024 ** 3):.2f} GiB while the next shard is staged."
+            )
+        print(
+            "Epoch 0 steps per rank: "
+            f"{plan['num_batches']} "
+            f"(samples/rank={plan['num_samples_per_rank']}, "
+            f"dropped_tail_per_rank={plan['dropped_samples_per_rank']})."
+        )
 
     torch._dynamo.config.cache_size_limit = 128
     torch._dynamo.config.optimize_ddp = False
