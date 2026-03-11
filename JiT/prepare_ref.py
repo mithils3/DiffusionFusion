@@ -4,7 +4,7 @@ from PIL import Image
 import numpy as np
 from torchvision import transforms, datasets
 from torch.utils.data import DataLoader, Dataset
-from util.crop import center_crop_arr
+from JiT.util.crop import center_crop_arr
 
 
 class HFDatasetAdapter(Dataset):

@@ -3,7 +3,7 @@ from typing import Callable
 
 import torch
 import torch.nn as nn
-from model_jit import JiT_models
+from JiT.model_jit import JiT_models
 
 
 class Denoiser(nn.Module):

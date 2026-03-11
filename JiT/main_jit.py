@@ -10,14 +10,14 @@ import torch.backends.cudnn as cudnn
 from torch.utils.tensorboard import SummaryWriter
 import wandb
 
-import util.misc as misc
-from util.dataset import (
+import JiT.util.misc as misc
+from JiT.util.dataset import (
     RamLoadedShardDataset,
     inspect_feature_shards,
 )
 import copy
-from engine_jit import train_one_epoch, evaluate
-from denoiser import Denoiser
+from JiT.engine_jit import train_one_epoch, evaluate
+from JiT.denoiser import Denoiser
 from diffusers.models import AutoencoderKL
 
 torch.backends.cuda.matmul.allow_tf32 = True

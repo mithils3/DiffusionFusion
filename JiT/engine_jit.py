@@ -8,8 +8,8 @@ import torch
 import numpy as np
 import cv2
 
-import util.misc as misc
-import util.lr_sched as lr_sched
+import JiT.util.misc as misc
+import JiT.util.lr_sched as lr_sched
 import torch_fidelity
 import copy
 from PIL import Image
