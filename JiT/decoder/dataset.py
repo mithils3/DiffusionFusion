@@ -56,6 +56,23 @@ def _parse_rank_from_shard_path(path: str) -> int:
     return int(parts[1])
 
 
+def _load_raw_image_dataset(data_path: str):
+    if os.path.isdir(data_path):
+        try:
+            dataset = load_from_disk(data_path)
+            if hasattr(dataset, "keys"):
+                if "train" not in dataset:
+                    raise KeyError(
+                        f'Expected a "train" split in decoder image dataset at {data_path}.'
+                    )
+                return dataset["train"]
+            return dataset
+        except Exception:
+            pass
+
+    return load_dataset(data_path, split="train")
+
+
 class RawImageStore:
     """Loads original RGB images using the same transform recipe as DINO feature extraction."""
 
@@ -65,12 +82,14 @@ class RawImageStore:
         sample_id_store: FeatureShardStore,
         model_name: str = "vit_base_patch16_dinov3.lvd1689m",
     ):
-        self.dataset = load_dataset(data_path, split="train")
+        self.dataset = _load_raw_image_dataset(data_path)
         self.dataset_size = len(self.dataset)
 
-        rank_ids = sorted({_parse_rank_from_shard_path(span.path) for span in sample_id_store.shard_spans})
+        rank_ids = sorted({_parse_rank_from_shard_path(span.path)
+                          for span in sample_id_store.shard_spans})
         if not rank_ids:
-            raise ValueError("Cannot build RawImageStore without feature shards.")
+            raise ValueError(
+                "Cannot build RawImageStore without feature shards.")
 
         self.extraction_world_size = rank_ids[-1] + 1
         if sample_id_store.total_size % self.extraction_world_size != 0:
@@ -86,20 +105,23 @@ class RawImageStore:
             features_only=True,
         )
         data_config = timm.data.resolve_model_data_config(transform_model)
-        self.transform = timm.data.create_transform(**data_config, is_training=False)
+        self.transform = timm.data.create_transform(
+            **data_config, is_training=False)
         del transform_model
 
     def sample_ids_to_dataset_indices(self, sample_ids: np.ndarray) -> np.ndarray:
         rank = sample_ids // self.extraction_sampler_len
         local = sample_ids % self.extraction_sampler_len
         dataset_indices = rank + local * self.extraction_world_size
-        dataset_indices = np.where(dataset_indices < self.dataset_size, dataset_indices, dataset_indices - self.dataset_size)
+        dataset_indices = np.where(
+            dataset_indices < self.dataset_size, dataset_indices, dataset_indices - self.dataset_size)
         return dataset_indices.astype(np.int64, copy=False)
 
     def load_batch(self, sample_ids: np.ndarray) -> torch.Tensor:
         dataset_indices = self.sample_ids_to_dataset_indices(sample_ids)
         rows = self.dataset[dataset_indices.tolist()]
-        images = [self.transform(image.convert("RGB")) for image in rows["image"]]
+        images = [self.transform(image.convert("RGB"))
+                  for image in rows["image"]]
         return torch.stack(images, dim=0)
 
 
@@ -147,7 +169,8 @@ def inspect_feature_shards(data_path: str, dataset_dir_name: str) -> FeatureShar
         prev_last_sample_id = last_sample_id
 
         if bytes_per_sample is None:
-            bytes_per_sample = int(np.asarray(shard_dataset[0]["feature"]).nbytes)
+            bytes_per_sample = int(np.asarray(
+                shard_dataset[0]["feature"]).nbytes)
 
         shard_spans.append(
             DatasetShardSpan(
@@ -279,7 +302,8 @@ class RamLoadedShardDataset(IterableDataset):
         if rank < 0:
             rank = dist.get_rank() if dist.is_initialized() else 0
         if batch_size <= 0:
-            raise ValueError("batch_size must be positive for RAM shard loading.")
+            raise ValueError(
+                "batch_size must be positive for RAM shard loading.")
 
         if latent_store.total_size != dino_store.total_size:
             raise ValueError(
@@ -312,7 +336,8 @@ class RamLoadedShardDataset(IterableDataset):
             for span in self.logical_shard_store.shard_spans
         ]
         if not self.logical_shards:
-            raise ValueError("RAM shard loading requires at least one logical shard.")
+            raise ValueError(
+                "RAM shard loading requires at least one logical shard.")
 
         self._cached_epoch = None
         self._cached_plan = None
@@ -336,7 +361,8 @@ class RamLoadedShardDataset(IterableDataset):
         generator.manual_seed(self.seed + self.epoch)
 
         if self.shuffle_shards:
-            shard_order = torch.randperm(len(self.logical_shards), generator=generator).tolist()
+            shard_order = torch.randperm(
+                len(self.logical_shards), generator=generator).tolist()
         else:
             shard_order = list(range(len(self.logical_shards)))
 
@@ -350,7 +376,8 @@ class RamLoadedShardDataset(IterableDataset):
             shard_indices_by_rank[target_rank].append(shard_idx)
             samples_by_rank[target_rank] += self.logical_shards[shard_idx].size
 
-        num_samples_per_rank = min(samples_by_rank) // self.batch_size * self.batch_size
+        num_samples_per_rank = min(
+            samples_by_rank) // self.batch_size * self.batch_size
         if num_samples_per_rank <= 0:
             raise ValueError(
                 "RAM shard loading produced zero usable samples per rank. "
@@ -449,17 +476,20 @@ class RamLoadedShardDataset(IterableDataset):
         pending_future: Optional[Future] = None
         try:
             first_span = self.logical_shards[shard_indices[0]]
-            pending_future = executor.submit(self._load_logical_shard, first_span)
+            pending_future = executor.submit(
+                self._load_logical_shard, first_span)
 
             for idx, shard_idx in enumerate(shard_indices):
                 shard_span = self.logical_shards[shard_idx]
                 current_future = pending_future
                 if current_future is None:
-                    raise RuntimeError("RAM shard prefetcher lost track of the current shard future.")
+                    raise RuntimeError(
+                        "RAM shard prefetcher lost track of the current shard future.")
 
                 if idx + 1 < len(shard_indices):
                     next_span = self.logical_shards[shard_indices[idx + 1]]
-                    pending_future = executor.submit(self._load_logical_shard, next_span)
+                    pending_future = executor.submit(
+                        self._load_logical_shard, next_span)
                 else:
                     pending_future = None
 
@@ -481,7 +511,8 @@ class RamLoadedShardDataset(IterableDataset):
         emitted_samples = 0
         carry_batch = None
 
-        shard_iter = self._iter_rank_shards(plan["shard_indices_by_rank"][self.rank])
+        shard_iter = self._iter_rank_shards(
+            plan["shard_indices_by_rank"][self.rank])
         try:
             for _shard_span, shard_rows in shard_iter:
                 if emitted_samples >= target_samples:
@@ -493,7 +524,8 @@ class RamLoadedShardDataset(IterableDataset):
                 if carry_batch is not None:
                     needed = self.batch_size - carry_batch["y"].shape[0]
                     take = min(needed, shard_size)
-                    carry_batch = _concat_rows(carry_batch, _slice_rows(shard_rows, slice(0, take)))
+                    carry_batch = _concat_rows(
+                        carry_batch, _slice_rows(shard_rows, slice(0, take)))
                     cursor = take
                     if carry_batch["y"].shape[0] == self.batch_size:
                         yield self._format_batch(carry_batch)
@@ -510,9 +542,11 @@ class RamLoadedShardDataset(IterableDataset):
                     cursor += self.batch_size
 
                 if emitted_samples < target_samples and cursor < shard_size:
-                    max_leftover = min(shard_size - cursor, target_samples - emitted_samples)
+                    max_leftover = min(shard_size - cursor,
+                                       target_samples - emitted_samples)
                     carry_slice = slice(cursor, cursor + max_leftover)
-                    carry_batch = _slice_rows(shard_rows, carry_slice, copy=True)
+                    carry_batch = _slice_rows(
+                        shard_rows, carry_slice, copy=True)
 
                 del shard_rows
                 gc.collect()

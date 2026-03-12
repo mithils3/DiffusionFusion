@@ -177,13 +177,21 @@ class DinoPatchDiscriminator(nn.Module):
                 "timm is required to build the decoder discriminator backbone."
             ) from exc
 
+        has_checkpoint = bool(checkpoint_path and os.path.exists(checkpoint_path))
+        if checkpoint_path and not has_checkpoint:
+            print(
+                f"Decoder discriminator checkpoint not found at {checkpoint_path}; "
+                "falling back to timm pretrained weights."
+            )
+
         backbone = timm.create_model(
             backbone_model_name,
-            pretrained=pretrained and checkpoint_path is None,
+            pretrained=pretrained and not has_checkpoint,
             num_classes=0,
         )
         data_config = timm.data.resolve_model_data_config(backbone)
-        _load_checkpoint_if_present(backbone, checkpoint_path)
+        if has_checkpoint:
+            _load_checkpoint_if_present(backbone, checkpoint_path)
         mean = tuple(data_config.get("mean", _DEFAULT_BACKBONE_MEAN))
         std = tuple(data_config.get("std", _DEFAULT_BACKBONE_STD))
         return backbone, mean, std

@@ -13,6 +13,7 @@ from .config import (
     OptimizerConfig,
     SchedulerConfig,
     default_decoder_plan_config,
+    load_decoder_plan_config,
 )
 from .gan import (
     DecoderGanTrainingState,
@@ -62,6 +63,7 @@ __all__ = [
     "get_decoder_last_layer",
     "hinge_discriminator_loss",
     "images_to_minus_one_to_one",
+    "load_decoder_plan_config",
     "mse_reconstruction_loss",
     "set_requires_grad",
     "vanilla_generator_loss",

@@ -54,6 +54,15 @@ def _unwrap_model(model):
     return model.module if hasattr(model, "module") else model
 
 
+def _forward_reconstruction(model, latent: torch.Tensor, dino: torch.Tensor) -> torch.Tensor:
+    reconstructed = model(latent, dino)
+    if not isinstance(reconstructed, torch.Tensor):
+        raise TypeError(
+            "Decoder training expects model(latent, dino) to return a reconstruction tensor."
+        )
+    return reconstructed
+
+
 def _adjust_optimizer_learning_rate(
     optimizer,
     epoch_progress: float,
@@ -298,7 +307,11 @@ def train_epoch(
             for _ in range(gan_state.loss_config.disc_updates):
                 with torch.no_grad():
                     with _autocast_context(device):
-                        reconstructed_for_disc = model_without_ddp.generate(latent_input, dino_input)
+                        reconstructed_for_disc = _forward_reconstruction(
+                            model,
+                            latent_input,
+                            dino_input,
+                        )
                 disc_metrics = _discriminator_step(
                     gan_state=gan_state,
                     real_images=target_image,
@@ -311,7 +324,7 @@ def train_epoch(
 
         optimizer.zero_grad(set_to_none=True)
         with _autocast_context(device):
-            reconstructed = model_without_ddp.generate(latent_input, dino_input)
+            reconstructed = _forward_reconstruction(model, latent_input, dino_input)
 
         use_perceptual = gan_state is not None and gan_state.loss_config.perceptual_enabled(epoch)
         perceptual_module = gan_state.perceptual_loss if use_perceptual else None

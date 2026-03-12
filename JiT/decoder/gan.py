@@ -7,7 +7,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 import JiT.util.misc as misc
 
 from .augment import DiscriminatorAugment
-from .config import DecoderLossConfig, default_decoder_plan_config
+from .config import DecoderLossConfig, DecoderPlanConfig, default_decoder_plan_config
 from .discriminator import DinoPatchDiscriminator
 from .losses import LPIPSLoss
 
@@ -19,6 +19,19 @@ def _get_arg_value(args, names: tuple[str, ...], default):
             if value is not None:
                 return value
     return default
+
+
+def _resolve_decoder_plan(args) -> DecoderPlanConfig:
+    plan = getattr(args, "decoder_plan", None)
+    if isinstance(plan, DecoderPlanConfig):
+        return plan
+    return default_decoder_plan_config()
+
+
+def _normalize_optional_path(value):
+    if value in ("", None):
+        return None
+    return str(value)
 
 
 @dataclass
@@ -112,7 +125,7 @@ def build_decoder_gan_training_state(
     args,
     device: torch.device,
 ) -> DecoderGanTrainingState:
-    plan = default_decoder_plan_config()
+    plan = _resolve_decoder_plan(args)
     loss_defaults = plan.gan.loss
     disc_defaults = plan.gan.disc
     train_defaults = plan.training
@@ -138,8 +151,52 @@ def build_decoder_gan_training_state(
     )
 
     disc_arch = disc_defaults.arch
+    disc_checkpoint_path = _normalize_optional_path(
+        _get_arg_value(
+            args,
+            ("decoder_disc_ckpt_path", "decoder_disc_checkpoint_path"),
+            disc_arch.dino_ckpt_path,
+        )
+    )
     discriminator = DinoPatchDiscriminator(
-        **disc_arch.build_kwargs(),
+        backbone_model_name=str(
+            _get_arg_value(
+                args,
+                ("decoder_disc_backbone_model_name",),
+                disc_arch.backbone_model_name,
+            )
+        ),
+        checkpoint_path=disc_checkpoint_path,
+        input_size=int(
+            _get_arg_value(args, ("decoder_disc_input_size",), disc_arch.input_size)
+        ),
+        feature_dim=int(
+            _get_arg_value(args, ("decoder_disc_feature_dim",), disc_arch.feature_dim)
+        ),
+        kernel_size=int(
+            _get_arg_value(
+                args,
+                ("decoder_disc_kernel_size", "decoder_disc_ks"),
+                disc_arch.ks,
+            )
+        ),
+        norm_type=str(
+            _get_arg_value(args, ("decoder_disc_norm_type",), disc_arch.norm_type)
+        ),
+        using_spec_norm=bool(
+            _get_arg_value(
+                args,
+                ("decoder_disc_using_spec_norm",),
+                disc_arch.using_spec_norm,
+            )
+        ),
+        freeze_backbone=bool(
+            _get_arg_value(
+                args,
+                ("decoder_disc_freeze_backbone",),
+                disc_arch.freeze_backbone,
+            )
+        ),
         pretrained=bool(_get_arg_value(args, ("decoder_disc_pretrained",), True)),
     ).to(device)
     if misc.is_dist_avail_and_initialized():
@@ -160,7 +217,9 @@ def build_decoder_gan_training_state(
     )
 
     lpips_net = str(_get_arg_value(args, ("decoder_lpips_net", "lpips_net"), "vgg"))
-    perceptual_loss = LPIPSLoss(net=lpips_net).to(device)
+    perceptual_loss = None
+    if loss_config.perceptual_weight > 0.0:
+        perceptual_loss = LPIPSLoss(net=lpips_net).to(device)
 
     augment_cfg = disc_defaults.augment
     discriminator_augment = DiscriminatorAugment(

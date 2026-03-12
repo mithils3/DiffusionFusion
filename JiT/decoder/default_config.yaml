@@ -28,7 +28,7 @@ gan:
   disc:
     arch:
       backbone_model_name: vit_small_patch8_224.dino
-      dino_ckpt_path: dino_vit_small_patch8_224.pth
+      dino_ckpt_path: null
       input_size: 224
       feature_dim: 384
       ks: 9

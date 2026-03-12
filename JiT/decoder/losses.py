@@ -3,8 +3,10 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 
-
-import lpips
+try:
+    import lpips
+except ImportError:
+    lpips = None
 
 
 def mse_reconstruction_loss(reconstructed: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
