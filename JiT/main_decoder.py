@@ -54,7 +54,7 @@ def get_args_parser() -> argparse.ArgumentParser:
 
     # decoder architecture
     parser.add_argument("--latent_size", default=32, type=int)
-    parser.add_argument("--dino_hidden_size", default=768, type=int)
+    parser.add_argument("--dino_hidden_size", default=decoder_defaults.dino_hidden_size, type=int)
     parser.add_argument("--latent_in_channels", default=4, type=int)
     parser.add_argument("--image_out_channels", default=3, type=int)
     parser.add_argument("--bottleneck_dim", default=128, type=int)
@@ -292,6 +292,7 @@ def build_decoder_model(args: argparse.Namespace) -> DecoderReconstructionModel:
         latent_patch_size=args.decoder_latent_patch_size,
         in_channels=args.latent_in_channels,
         bottleneck_dim=args.bottleneck_dim,
+        dino_hidden_size=args.dino_hidden_size,
         hidden_size=args.decoder_hidden_size,
         out_channels=args.image_out_channels,
         depth=args.decoder_depth,

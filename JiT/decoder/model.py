@@ -10,9 +10,10 @@ from JiT.util.model_util import get_2d_sincos_pos_embed
 class Decoder(nn.Module):
     """Transformer decoder that reconstructs an image from DINO and latent tokens."""
 
-    def __init__(self, input_size: int, patch_size: int, latent_patch_size: int, in_channels: int, bottleneck_dim: int, hidden_size: int, out_channels: int, depth: int, attn_drop=0.0,
+    def __init__(self, input_size: int, patch_size: int, latent_patch_size: int, in_channels: int, bottleneck_dim: int, dino_hidden_size: int, hidden_size: int, out_channels: int, depth: int, attn_drop=0.0,
                  proj_drop=0.0, num_heads=8, mlp_ratio=4.0, output_image_size: int = 256) -> None:
         super().__init__()
+        self.dino_hidden_size = dino_hidden_size
         self.hidden_size = hidden_size
         self.out_channels = out_channels
         self.patch_size = patch_size
@@ -27,6 +28,9 @@ class Decoder(nn.Module):
         self.latent_tokenizer = BottleneckPatchEmbed(
             input_size, latent_patch_size, in_channels, bottleneck_dim, hidden_size, bias=True)
         self.num_patches = self.latent_tokenizer.num_patches
+        self.dino_embedder = nn.Identity() if dino_hidden_size == hidden_size else nn.Linear(
+            dino_hidden_size, hidden_size, bias=True
+        )
         self.pos_embed = nn.Parameter(torch.zeros(
             1, self.num_patches, hidden_size), requires_grad=False)
         self.query_tokens = nn.Parameter(
@@ -101,6 +105,10 @@ class Decoder(nn.Module):
         nn.init.xavier_uniform_(w2.view(w2.shape[0], -1))
         if self.latent_tokenizer.proj2.bias is not None:
             nn.init.constant_(self.latent_tokenizer.proj2.bias, 0)
+        if isinstance(self.dino_embedder, nn.Linear):
+            wd = self.dino_embedder.weight.data
+            nn.init.xavier_uniform_(wd.view(wd.shape[0], -1))
+            nn.init.constant_(self.dino_embedder.bias, 0)
 
         # Scale residual-stream projections for stability across depth.
         residual_scale = 1 / math.sqrt(2 * max(self.depth, 1))
@@ -114,12 +122,31 @@ class Decoder(nn.Module):
         nn.init.normal_(self.final_layer.linear.weight, std=final_std)
         nn.init.constant_(self.final_layer.linear.bias, 0)
 
+    def _prepare_dino_tokens(self, dino: torch.Tensor) -> torch.Tensor:
+        if dino.ndim == 4:
+            dino = dino.flatten(2).transpose(1, 2)
+        elif dino.ndim != 3:
+            raise ValueError(
+                f"DINO features must be rank-3 or rank-4, got shape {tuple(dino.shape)}."
+            )
+
+        if dino.shape[-1] != self.dino_hidden_size:
+            raise ValueError(
+                f"Expected DINO channel width {self.dino_hidden_size}, got {dino.shape[-1]}."
+            )
+        if dino.shape[1] != self.num_patches:
+            raise ValueError(
+                f"Expected {self.num_patches} DINO tokens to match latent patches, got {dino.shape[1]}."
+            )
+
+        return self.dino_embedder(dino) + self.pos_embed
+
     def forward(self, dino, latent):
         """
         Decode a pair of aligned context streams into an output image.
 
         Args:
-            dino: DINO context tokens of shape ``[B, T, D]``.
+            dino: DINO features of shape ``[B, D, H, W]`` or DINO tokens ``[B, T, D]``.
             latent: Latent feature map consumed by ``latent_tokenizer``.
 
         Returns:
@@ -127,7 +154,7 @@ class Decoder(nn.Module):
         """
         latent_tokens = self.latent_tokenizer(latent)
         latent_tokens = latent_tokens + self.pos_embed
-        dino = dino + self.pos_embed
+        dino = self._prepare_dino_tokens(dino)
 
         # Use one shared set of learnable query slots and broadcast it across the batch.
         x = self.query_tokens.expand(latent.shape[0], -1, -1)
@@ -306,6 +333,7 @@ def Small(**kwargs):
         latent_patch_size=2,
         in_channels=4,
         bottleneck_dim=128,
+        dino_hidden_size=768,
         hidden_size=768,
         out_channels=3,
         depth=12,

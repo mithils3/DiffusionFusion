@@ -41,7 +41,7 @@ def train_one_epoch(model, model_without_ddp, data_loader, optimizer, device, ep
         latent = batch["latent"].to(device, non_blocking=True)
         dino = batch["dino"].to(device, non_blocking=True)
         labels = batch["y"].to(device, non_blocking=True).view(-1).long()
-        with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+        with torch.autocast('cuda', dtype=torch.bfloat16):
             loss = model(latent, dino, labels)
 
         loss_value = loss.item()
@@ -183,7 +183,7 @@ def evaluate(model_without_ddp, args, epoch, vae, batch_size=64, log_writer=None
         torch.distributed.barrier()
 
     if metrics_requested and misc.is_main_process():
-        
+
         fid_statistics_file = '/work/nvme/betw/msalunkhe/data/jit_in256_stats.npz'
         metrics_dict = torch_fidelity.calculate_metrics(
             input1=save_folder,

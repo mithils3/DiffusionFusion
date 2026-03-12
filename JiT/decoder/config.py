@@ -33,6 +33,7 @@ class SchedulerConfig:
 
 @dataclass(frozen=True)
 class DecoderModelConfig:
+    dino_hidden_size: int = 768
     hidden_size: int = 1152
     depth: int = 12
     num_heads: int = 16
@@ -186,6 +187,7 @@ def _build_decoder_model_config(
     if not data:
         return defaults
     return DecoderModelConfig(
+        dino_hidden_size=int(data.get("dino_hidden_size", defaults.dino_hidden_size)),
         hidden_size=int(data.get("hidden_size", defaults.hidden_size)),
         depth=int(data.get("depth", defaults.depth)),
         num_heads=int(data.get("num_heads", defaults.num_heads)),
