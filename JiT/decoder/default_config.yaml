@@ -1,0 +1,60 @@
+decoder:
+  hidden_size: 1152
+  depth: 12
+  num_heads: 16
+  mlp_ratio: 4.0
+  patch_size: 16
+  latent_patch_size: 2
+  output_image_size: 256
+  noise_tau: 0.8
+
+training:
+  epochs: 16
+  ema_decay: 0.9978
+  global_batch_size: 512
+  optimizer:
+    lr: 2.0e-4
+    betas: [0.9, 0.95]
+    weight_decay: 0.0
+  scheduler:
+    type: cosine
+    warmup_epochs: 1
+    decay_end_epoch: 16
+    base_lr: 2.0e-4
+    final_lr: 2.0e-5
+    warmup_from_zero: true
+
+gan:
+  disc:
+    arch:
+      backbone_model_name: vit_small_patch8_224.dino
+      dino_ckpt_path: dino_vit_small_patch8_224.pth
+      input_size: 224
+      feature_dim: 384
+      ks: 9
+      norm_type: bn
+      using_spec_norm: true
+      recipe: S_8
+      freeze_backbone: false
+    optimizer:
+      lr: 2.0e-4
+      betas: [0.9, 0.95]
+      weight_decay: 0.0
+    augment:
+      prob: 1.0
+      cutout: 0.0
+      brightness: 0.2
+      contrast: 0.2
+      saturation: 0.2
+      horizontal_flip: true
+  loss:
+    disc_loss: hinge
+    gen_loss: vanilla
+    disc_weight: 0.75
+    perceptual_weight: 1.0
+    adaptive_weight: true
+    disc_start: 8
+    disc_upd_start: 6
+    lpips_start: 0
+    max_d_weight: 10000.0
+    disc_updates: 1
