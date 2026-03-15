@@ -405,7 +405,9 @@ def train_epoch(
             if key in step_metrics:
                 metric_logger.update(**{key: step_metrics[key]})
 
-        if log_writer is not None or wandb_run is not None:
+        # In DDP, every rank must enter the same reductions even though only
+        # rank 0 owns the logger integrations.
+        if misc.is_dist_avail_and_initialized():
             reduced_metrics = _reduce_metrics(step_metrics)
         else:
             reduced_metrics = step_metrics
