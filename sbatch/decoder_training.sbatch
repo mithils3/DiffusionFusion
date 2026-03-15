@@ -18,7 +18,6 @@ module load cuda/12.9.0
 
 source /u/msalunkhe/.venv/bin/activate
 cd /u/msalunkhe/DiffusionFusion/JiT
-pip install -e .
 git pull
 
 IMAGE_DATA_PATH="ILSVRC/imagenet-1k"
