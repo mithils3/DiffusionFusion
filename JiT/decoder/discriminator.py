@@ -112,7 +112,7 @@ class DinoPatchDiscriminator(nn.Module):
         input_size: int = 224,
         feature_dim: int = 384,
         kernel_size: int = 9,
-        norm_type: str = "bn",
+        norm_type: str = "gn",
         using_spec_norm: bool = True,
         freeze_backbone: bool = False,
         backbone: nn.Module | None = None,

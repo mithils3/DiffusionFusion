@@ -390,6 +390,7 @@ def train_epoch(
                     get_decoder_last_layer(model_without_ddp),
                     gan_state.loss_config.max_d_weight,
                 )
+            disc_weight = disc_weight * gan_state.loss_config.adversarial_scale(epoch_progress)
             total_loss = total_loss + disc_weight * adversarial_loss
             disc_weight_value = float(disc_weight.detach().item())
             discriminator.train(True)

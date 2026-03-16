@@ -145,6 +145,13 @@ def build_decoder_gan_training_state(
         disc_upd_start=int(
             _get_arg_value(args, ("decoder_disc_upd_start", "disc_upd_start"), loss_defaults.disc_upd_start)
         ),
+        adversarial_warmup_epochs=float(
+            _get_arg_value(
+                args,
+                ("decoder_adversarial_warmup_epochs", "adversarial_warmup_epochs"),
+                loss_defaults.adversarial_warmup_epochs,
+            )
+        ),
         lpips_start=int(_get_arg_value(args, ("decoder_lpips_start", "lpips_start"), loss_defaults.lpips_start)),
         max_d_weight=float(_get_arg_value(args, ("decoder_max_d_weight", "max_d_weight"), loss_defaults.max_d_weight)),
         disc_updates=int(_get_arg_value(args, ("decoder_disc_updates", "disc_updates"), loss_defaults.disc_updates)),

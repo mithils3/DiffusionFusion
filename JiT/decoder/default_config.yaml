@@ -33,7 +33,7 @@ gan:
       input_size: 224
       feature_dim: 384
       ks: 9
-      norm_type: bn
+      norm_type: gn
       using_spec_norm: true
       recipe: S_8
       freeze_backbone: false
@@ -56,6 +56,7 @@ gan:
     adaptive_weight: true
     disc_start: 8
     disc_upd_start: 6
+    adversarial_warmup_epochs: 1.0
     lpips_start: 0
-    max_d_weight: 10000.0
+    max_d_weight: 1.0
     disc_updates: 1

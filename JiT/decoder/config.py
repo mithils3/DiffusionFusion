@@ -60,7 +60,7 @@ class DiscriminatorArchConfig:
     input_size: int = 224
     feature_dim: int = 384
     ks: int = 9
-    norm_type: NormType = "bn"
+    norm_type: NormType = "gn"
     using_spec_norm: bool = True
     recipe: str = "S_8"
     freeze_backbone: bool = False
@@ -114,8 +114,9 @@ class DecoderLossConfig:
     adaptive_weight: bool = True
     disc_start: int = 8
     disc_upd_start: int = 6
+    adversarial_warmup_epochs: float = 1.0
     lpips_start: int = 0
-    max_d_weight: float = 10000.0
+    max_d_weight: float = 1.0
     disc_updates: int = 1
 
     def perceptual_enabled(self, epoch: int) -> bool:
@@ -126,6 +127,14 @@ class DecoderLossConfig:
 
     def adversarial_enabled(self, epoch: int) -> bool:
         return epoch >= self.disc_start
+
+    def adversarial_scale(self, epoch_progress: float) -> float:
+        if epoch_progress < self.disc_start:
+            return 0.0
+        if self.adversarial_warmup_epochs <= 0.0:
+            return 1.0
+        progress = (epoch_progress - self.disc_start) / self.adversarial_warmup_epochs
+        return float(min(1.0, max(0.0, progress)))
 
 
 @dataclass(frozen=True)
@@ -276,6 +285,9 @@ def _build_decoder_loss_config(
         adaptive_weight=bool(data.get("adaptive_weight", defaults.adaptive_weight)),
         disc_start=int(data.get("disc_start", defaults.disc_start)),
         disc_upd_start=int(data.get("disc_upd_start", defaults.disc_upd_start)),
+        adversarial_warmup_epochs=float(
+            data.get("adversarial_warmup_epochs", defaults.adversarial_warmup_epochs)
+        ),
         lpips_start=int(data.get("lpips_start", defaults.lpips_start)),
         max_d_weight=float(data.get("max_d_weight", defaults.max_d_weight)),
         disc_updates=int(data.get("disc_updates", defaults.disc_updates)),

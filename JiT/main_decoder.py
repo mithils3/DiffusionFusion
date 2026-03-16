@@ -169,6 +169,11 @@ def get_args_parser() -> argparse.ArgumentParser:
     parser.set_defaults(decoder_adaptive_weight=loss_defaults.adaptive_weight)
     parser.add_argument("--decoder_disc_start", default=loss_defaults.disc_start, type=int)
     parser.add_argument("--decoder_disc_upd_start", default=loss_defaults.disc_upd_start, type=int)
+    parser.add_argument(
+        "--decoder_adversarial_warmup_epochs",
+        default=loss_defaults.adversarial_warmup_epochs,
+        type=float,
+    )
     parser.add_argument("--decoder_lpips_start", default=loss_defaults.lpips_start, type=int)
     parser.add_argument("--decoder_max_d_weight", default=loss_defaults.max_d_weight, type=float)
     parser.add_argument("--decoder_disc_updates", default=loss_defaults.disc_updates, type=int)
