@@ -294,6 +294,7 @@ class RamLoadedShardDataset(IterableDataset):
         shuffle_shards: bool = True,
         seed: int = 0,
         preload_next_shard: bool = True,
+        preload_next_batch: bool = True,
         image_data_path: Optional[str] = None,
         image_model_name: str = "vit_base_patch16_dinov3.lvd1689m",
     ):
@@ -323,6 +324,7 @@ class RamLoadedShardDataset(IterableDataset):
         self.shuffle_shards = shuffle_shards
         self.seed = seed
         self.preload_next_shard = preload_next_shard
+        self.preload_next_batch = preload_next_batch
         self.epoch = 0
         self.image_store = RawImageStore(
             image_data_path,
@@ -457,6 +459,111 @@ class RamLoadedShardDataset(IterableDataset):
             "image": self.image_store.load_batch(rows["sample_id"]),
         }
 
+    def _iter_batch_rows(self) -> Iterator[Dict[str, np.ndarray]]:
+        plan = self._build_epoch_plan()
+        target_samples = plan["num_samples_per_rank"]
+        emitted_samples = 0
+        carry_batch = None
+
+        shard_iter = self._iter_rank_shards(plan["shard_indices_by_rank"][self.rank])
+        try:
+            for _shard_span, shard_rows in shard_iter:
+                if emitted_samples >= target_samples:
+                    break
+
+                shard_size = shard_rows["y"].shape[0]
+                cursor = 0
+
+                if carry_batch is not None:
+                    needed = self.batch_size - carry_batch["y"].shape[0]
+                    take = min(needed, shard_size)
+                    carry_batch = _concat_rows(
+                        carry_batch, _slice_rows(shard_rows, slice(0, take)))
+                    cursor = take
+                    if carry_batch["y"].shape[0] == self.batch_size:
+                        yield carry_batch
+                        emitted_samples += self.batch_size
+                        carry_batch = None
+
+                while (
+                    cursor + self.batch_size <= shard_size
+                    and emitted_samples + self.batch_size <= target_samples
+                ):
+                    batch_slice = slice(cursor, cursor + self.batch_size)
+                    yield _slice_rows(shard_rows, batch_slice)
+                    emitted_samples += self.batch_size
+                    cursor += self.batch_size
+
+                if emitted_samples < target_samples and cursor < shard_size:
+                    max_leftover = min(shard_size - cursor,
+                                       target_samples - emitted_samples)
+                    carry_slice = slice(cursor, cursor + max_leftover)
+                    carry_batch = _slice_rows(
+                        shard_rows, carry_slice, copy=True)
+
+                del shard_rows
+                gc.collect()
+        finally:
+            close_fn = getattr(shard_iter, "close", None)
+            if close_fn is not None:
+                close_fn()
+
+        if carry_batch is not None:
+            raise RuntimeError(
+                "RAM shard loading finished with an incomplete batch. "
+                "This should not happen when num_samples_per_rank is batch-aligned."
+            )
+        if emitted_samples != target_samples:
+            raise RuntimeError(
+                f"RAM shard loading emitted {emitted_samples} samples on rank {self.rank}, "
+                f"expected {target_samples}."
+            )
+
+    def _iter_prefetched_batches(
+        self,
+        batch_rows_iter: Iterator[Dict[str, np.ndarray]],
+    ) -> Iterator[Dict[str, torch.Tensor]]:
+        if not self.preload_next_batch:
+            for rows in batch_rows_iter:
+                yield self._format_batch(rows)
+            return
+
+        executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix=f"decoder-batch-prefetch-r{self.rank}",
+        )
+        pending_future: Optional[Future] = None
+        batch_iter = iter(batch_rows_iter)
+        try:
+            first_rows = next(batch_iter, None)
+            if first_rows is None:
+                return
+            pending_future = executor.submit(self._format_batch, first_rows)
+
+            for rows in batch_iter:
+                current_future = pending_future
+                if current_future is None:
+                    raise RuntimeError(
+                        "Decoder batch prefetcher lost track of the current batch future."
+                    )
+                pending_future = executor.submit(self._format_batch, rows)
+                yield current_future.result()
+
+            current_future = pending_future
+            if current_future is None:
+                raise RuntimeError(
+                    "Decoder batch prefetcher lost track of the final batch future."
+                )
+            pending_future = None
+            yield current_future.result()
+        finally:
+            if pending_future is not None:
+                pending_future.cancel()
+            close_fn = getattr(batch_rows_iter, "close", None)
+            if close_fn is not None:
+                close_fn()
+            executor.shutdown(wait=True, cancel_futures=True)
+
     def _iter_rank_shards(
         self, shard_indices: List[int]
     ) -> Iterator[Tuple[LogicalShardSpan, Dict[str, np.ndarray]]]:
@@ -505,66 +612,8 @@ class RamLoadedShardDataset(IterableDataset):
             raise RuntimeError(
                 "RamLoadedShardDataset does not support DataLoader workers. Use num_workers=0."
             )
-
-        plan = self._build_epoch_plan()
-        target_samples = plan["num_samples_per_rank"]
-        emitted_samples = 0
-        carry_batch = None
-
-        shard_iter = self._iter_rank_shards(
-            plan["shard_indices_by_rank"][self.rank])
-        try:
-            for _shard_span, shard_rows in shard_iter:
-                if emitted_samples >= target_samples:
-                    break
-
-                shard_size = shard_rows["y"].shape[0]
-                cursor = 0
-
-                if carry_batch is not None:
-                    needed = self.batch_size - carry_batch["y"].shape[0]
-                    take = min(needed, shard_size)
-                    carry_batch = _concat_rows(
-                        carry_batch, _slice_rows(shard_rows, slice(0, take)))
-                    cursor = take
-                    if carry_batch["y"].shape[0] == self.batch_size:
-                        yield self._format_batch(carry_batch)
-                        emitted_samples += self.batch_size
-                        carry_batch = None
-
-                while (
-                    cursor + self.batch_size <= shard_size
-                    and emitted_samples + self.batch_size <= target_samples
-                ):
-                    batch_slice = slice(cursor, cursor + self.batch_size)
-                    yield self._format_batch(_slice_rows(shard_rows, batch_slice))
-                    emitted_samples += self.batch_size
-                    cursor += self.batch_size
-
-                if emitted_samples < target_samples and cursor < shard_size:
-                    max_leftover = min(shard_size - cursor,
-                                       target_samples - emitted_samples)
-                    carry_slice = slice(cursor, cursor + max_leftover)
-                    carry_batch = _slice_rows(
-                        shard_rows, carry_slice, copy=True)
-
-                del shard_rows
-                gc.collect()
-        finally:
-            close_fn = getattr(shard_iter, "close", None)
-            if close_fn is not None:
-                close_fn()
-
-        if carry_batch is not None:
-            raise RuntimeError(
-                "RAM shard loading finished with an incomplete batch. "
-                "This should not happen when num_samples_per_rank is batch-aligned."
-            )
-        if emitted_samples != target_samples:
-            raise RuntimeError(
-                f"RAM shard loading emitted {emitted_samples} samples on rank {self.rank}, "
-                f"expected {target_samples}."
-            )
+        batch_rows_iter = self._iter_batch_rows()
+        yield from self._iter_prefetched_batches(batch_rows_iter)
 
     def __len__(self):
         return self._build_epoch_plan()["num_batches"]

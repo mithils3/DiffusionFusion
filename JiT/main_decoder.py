@@ -124,6 +124,9 @@ def get_args_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ram_shard_prefetch", action="store_true")
     parser.add_argument("--no_ram_shard_prefetch", action="store_false", dest="ram_shard_prefetch")
     parser.set_defaults(ram_shard_prefetch=True)
+    parser.add_argument("--decoder_batch_prefetch", action="store_true")
+    parser.add_argument("--no_decoder_batch_prefetch", action="store_false", dest="decoder_batch_prefetch")
+    parser.set_defaults(decoder_batch_prefetch=True)
 
     # data
     parser.add_argument("--data_path", required=True, type=str, help="Feature shard root directory.")
@@ -369,6 +372,10 @@ def describe_dataset_plan(dataset: RamLoadedShardDataset, latent_store, dino_sto
             "RAM shard prefetch enabled: peak per-rank working set can temporarily reach about "
             f"{approx_peak_ram_bytes / (1024 ** 3):.2f} GiB while the next shard is staged."
         )
+    if dataset.preload_next_batch:
+        print(
+            "Decoder batch prefetch enabled: one formatted batch is prepared on CPU while the current step runs."
+        )
     print(
         "Epoch 0 steps per rank: "
         f"{plan['num_batches']} "
@@ -387,6 +394,7 @@ def build_data_loader(
     shuffle_shards: bool,
     seed: int,
     preload_next_shard: bool,
+    preload_next_batch: bool,
     image_data_path: str,
     image_model_name: str,
     pin_mem: bool,
@@ -400,6 +408,7 @@ def build_data_loader(
         shuffle_shards=shuffle_shards,
         seed=seed,
         preload_next_shard=preload_next_shard,
+        preload_next_batch=preload_next_batch,
         image_data_path=image_data_path,
         image_model_name=image_model_name,
     )
@@ -465,6 +474,7 @@ def main(args: argparse.Namespace) -> None:
         shuffle_shards=True,
         seed=args.seed,
         preload_next_shard=args.ram_shard_prefetch,
+        preload_next_batch=args.decoder_batch_prefetch,
         image_data_path=args.image_data_path,
         image_model_name=args.image_model_name,
         pin_mem=args.pin_mem,
@@ -478,6 +488,7 @@ def main(args: argparse.Namespace) -> None:
         shuffle_shards=False,
         seed=args.seed,
         preload_next_shard=False,
+        preload_next_batch=args.decoder_batch_prefetch,
         image_data_path=args.image_data_path,
         image_model_name=args.image_model_name,
         pin_mem=args.pin_mem,
