@@ -2,6 +2,7 @@ from contextlib import nullcontext
 from itertools import islice
 import math
 import os
+from pathlib import Path
 import shutil
 import sys
 import time
@@ -37,6 +38,7 @@ except ImportError:
 
 _DEFAULT_IMAGE_MEAN = (0.485, 0.456, 0.406)
 _DEFAULT_IMAGE_STD = (0.229, 0.224, 0.225)
+_JIT_FID_STATS_DIR = Path(__file__).resolve().parents[1] / "fid_stats"
 
 
 def _dist_barrier():
@@ -125,8 +127,8 @@ def _extract_image_normalization(data_loader):
             std = getattr(step, "std", None)
             if mean is not None and std is not None:
                 return (
-                    torch.tensor(mean, dtype=torch.float32).view(1, -1, 1, 1),
-                    torch.tensor(std, dtype=torch.float32).view(1, -1, 1, 1),
+                    torch.as_tensor(mean, dtype=torch.float32).view(1, -1, 1, 1),
+                    torch.as_tensor(std, dtype=torch.float32).view(1, -1, 1, 1),
                 )
 
     if misc.is_main_process():
@@ -171,6 +173,26 @@ def _resolve_decoder_reference_dir(args):
         reference_dir = getattr(args, attr_name, None)
         if reference_dir:
             return reference_dir
+    return None
+
+
+def _resolve_decoder_fid_stats_file(args):
+    for attr_name in (
+        "decoder_eval_fid_stats",
+        "eval_fid_stats",
+        "fid_statistics_file",
+    ):
+        fid_stats_path = getattr(args, attr_name, None)
+        if fid_stats_path:
+            return fid_stats_path
+
+    image_size = int(getattr(args, "decoder_output_image_size", 256))
+    for candidate in (
+        Path(f"/work/nvme/betw/msalunkhe/data/jit_in{image_size}_stats.npz"),
+        _JIT_FID_STATS_DIR / f"jit_in{image_size}_stats.npz",
+    ):
+        if candidate.is_file():
+            return str(candidate)
     return None
 
 
@@ -578,7 +600,8 @@ def evaluate(model_without_ddp, args, epoch, vae=None, batch_size=64, log_writer
         log_payload["eval/samples{}".format(postfix)] = wandb_table
 
     reference_dir = _resolve_decoder_reference_dir(args)
-    distribution_metrics_requested = bool(reference_dir)
+    fid_statistics_file = _resolve_decoder_fid_stats_file(args)
+    distribution_metrics_requested = bool(reference_dir or fid_statistics_file)
     metrics_done_path = os.path.join(
         eval_root,
         f".decoder_eval_metrics_done_epoch_{int(epoch):05d}",
@@ -593,14 +616,17 @@ def evaluate(model_without_ddp, args, epoch, vae=None, batch_size=64, log_writer
             raise ImportError(
                 "torch_fidelity is not installed. Install it to run decoder evaluation metrics."
             )
-        if not os.path.isdir(reference_dir):
+        if reference_dir and not os.path.isdir(reference_dir):
             raise FileNotFoundError(
                 f"Decoder eval reference directory not found: {reference_dir}"
             )
+        if fid_statistics_file and not os.path.isfile(fid_statistics_file):
+            raise FileNotFoundError(
+                f"Decoder eval FID statistics file not found: {fid_statistics_file}"
+            )
 
-        metrics_dict = torch_fidelity.calculate_metrics(
+        metrics_kwargs = dict(
             input1=eval_output_dir,
-            input2=reference_dir,
             cuda=device.type == "cuda",
             isc=True,
             fid=True,
@@ -608,6 +634,12 @@ def evaluate(model_without_ddp, args, epoch, vae=None, batch_size=64, log_writer
             prc=False,
             verbose=True,
         )
+        if reference_dir:
+            metrics_kwargs["input2"] = reference_dir
+        else:
+            metrics_kwargs["input2"] = None
+            metrics_kwargs["fid_statistics_file"] = fid_statistics_file
+        metrics_dict = torch_fidelity.calculate_metrics(**metrics_kwargs)
         fid = metrics_dict["frechet_inception_distance"]
         inception_score = metrics_dict["inception_score_mean"]
         if log_writer is not None:
@@ -635,8 +667,8 @@ def evaluate(model_without_ddp, args, epoch, vae=None, batch_size=64, log_writer
         print("Decoder eval metrics | Recon MSE: {:.6f}".format(recon_mse))
         if getattr(args, "decoder_eval_metrics", True):
             print(
-                "Skipping FID/IS because no decoder eval reference directory was provided. "
-                "Set args.decoder_eval_reference_dir (or args.eval_reference_dir)."
+                "Skipping FID/IS because no decoder eval reference directory or FID stats file was provided. "
+                "Set args.decoder_eval_reference_dir or args.decoder_eval_fid_stats."
             )
 
     if wandb_run is not None:

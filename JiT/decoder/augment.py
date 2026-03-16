@@ -64,25 +64,29 @@ class DiscriminatorAugment(nn.Module):
                 selected[flip_mask] = torch.flip(selected[flip_mask], dims=(-1,))
 
         if self.brightness > 0.0:
-            brightness = torch.empty(
-                selected.shape[0], 1, 1, 1, device=selected.device
-            ).uniform_(1.0 - self.brightness, 1.0 + self.brightness)
+            brightness = selected.new_empty(selected.shape[0], 1, 1, 1).uniform_(
+                1.0 - self.brightness,
+                1.0 + self.brightness,
+            )
             selected = selected * brightness
 
         if self.contrast > 0.0:
-            contrast = torch.empty(
-                selected.shape[0], 1, 1, 1, device=selected.device
-            ).uniform_(1.0 - self.contrast, 1.0 + self.contrast)
+            contrast = selected.new_empty(selected.shape[0], 1, 1, 1).uniform_(
+                1.0 - self.contrast,
+                1.0 + self.contrast,
+            )
             mean = selected.mean(dim=(2, 3), keepdim=True)
             selected = (selected - mean) * contrast + mean
 
         if self.saturation > 0.0 and selected.shape[1] == 3:
-            saturation = torch.empty(
-                selected.shape[0], 1, 1, 1, device=selected.device
-            ).uniform_(1.0 - self.saturation, 1.0 + self.saturation)
+            saturation = selected.new_empty(selected.shape[0], 1, 1, 1).uniform_(
+                1.0 - self.saturation,
+                1.0 + self.saturation,
+            )
             grayscale = selected.mean(dim=1, keepdim=True)
             selected = (selected - grayscale) * saturation + grayscale
 
         selected = _apply_cutout(selected, self.cutout)
+        selected = selected.to(dtype=augmented.dtype)
         augmented[apply_mask] = selected
         return augmented

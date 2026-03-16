@@ -224,6 +224,12 @@ def get_args_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output_dir", default="./output_dir_decoder", type=str)
     parser.add_argument("--resume", default="", type=str)
     parser.add_argument("--decoder_eval_reference_dir", default=None, type=str)
+    parser.add_argument(
+        "--decoder_eval_fid_stats",
+        default=None,
+        type=str,
+        help="Path to a torch-fidelity FID statistics .npz file. If omitted, decoder eval reuses JiT's default stats file when available.",
+    )
     parser.add_argument("--decoder_eval_metrics", action="store_true")
     parser.add_argument("--no_decoder_eval_metrics", action="store_false", dest="decoder_eval_metrics")
     parser.set_defaults(decoder_eval_metrics=True)
