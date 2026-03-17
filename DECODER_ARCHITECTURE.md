@@ -234,7 +234,7 @@ Combined decoder loss:
 L_decoder = L_mse + 1.0 * L_lpips + 0.75 * L_gen
 ```
 
-The adversarial weight is capped by `max_d_weight = 10000.0` if adaptive weighting is used (where the adversarial weight is automatically scaled based on the ratio of gradients from the reconstruction and adversarial losses, following VQGAN).
+The adversarial weight is capped by `max_d_weight = 4.0` if adaptive weighting is used (where the adversarial weight is automatically scaled based on the ratio of gradients from the reconstruction and adversarial losses, following VQGAN).
 
 The discriminator is updated once per decoder update. The decoder's adversarial gradient flows through the reconstruction back to the decoder weights, but the discriminator's weights are frozen during this step. They alternate: one discriminator step, one decoder step.
 
@@ -318,6 +318,6 @@ gan:
     disc_start: 8          # adversarial loss → decoder from epoch 8
     disc_upd_start: 6      # discriminator trains from epoch 6
     lpips_start: 0          # perceptual loss from epoch 0
-    max_d_weight: 10000.0
+    max_d_weight: 4.0
     disc_updates: 1         # one D step per G step
 ```

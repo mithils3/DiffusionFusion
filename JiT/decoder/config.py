@@ -116,7 +116,7 @@ class DecoderLossConfig:
     disc_upd_start: int = 6
     adversarial_warmup_epochs: float = 1.0
     lpips_start: int = 0
-    max_d_weight: float = 1.0
+    max_d_weight: float = 4.0
     disc_updates: int = 1
 
     def perceptual_enabled(self, epoch: int) -> bool:
