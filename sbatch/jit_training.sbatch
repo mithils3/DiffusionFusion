@@ -21,8 +21,8 @@ source /u/msalunkhe/.venv/bin/activate
 cd /u/msalunkhe/DiffusionFusion/JiT
 git pull
 IMAGENET_PATH="/work/hdd/bgnp/msalunkhe/data/imagenet/"
-OUTPUT_DIR="/work/nvme/bgnp/msalunkhe/outputs/jit_large_patch_size_2_dino_latent_naive"
-rm -rf  ${OUTPUT_DIR}
+OUTPUT_DIR="/work/nvme/bgnp/msalunkhe/outputs/jit_large_patch_size_2_dino_latent_centercrop"
+mkdir -p "${OUTPUT_DIR}"
 OMP_NUM_THREADS=16 torchrun \
 --nproc_per_node=auto \
 --nnodes=1 \
@@ -43,7 +43,6 @@ main_jit.py \
 --interval_min 0.1 \
 --interval_max 1.0 \
 --output_dir ${OUTPUT_DIR} \
---resume ${OUTPUT_DIR} \
 --data_path ${IMAGENET_PATH} \
 --online_eval \
 --class_num 1000 \

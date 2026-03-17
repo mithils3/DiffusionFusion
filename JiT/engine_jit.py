@@ -151,7 +151,7 @@ def evaluate(model_without_ddp, args, epoch, vae, batch_size=64, log_writer=None
             if index >= args.num_images:
                 continue
 
-            Image.fromarray(sample).save(os.path.join(save_folder, '{}.jpg'.format(
+            Image.fromarray(sample).save(os.path.join(save_folder, '{}.png'.format(
                 str(index).zfill(5))))
             if wandb_table is not None and index % eval_image_interval == 0:
                 class_id = int(labels_gen_np[sample_idx])

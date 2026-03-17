@@ -4,7 +4,8 @@ from PIL import Image
 import numpy as np
 from torchvision import transforms, datasets
 from torch.utils.data import DataLoader, Dataset
-from JiT.util.crop import center_crop_arr
+
+from JiT.util.image_transforms import build_center_crop_normalize_transform
 
 
 class HFDatasetAdapter(Dataset):
@@ -61,11 +62,7 @@ def main():
                         help='Optional HF cache directory')
     args = parser.parse_args()
 
-    transform_train = transforms.Compose([
-        transforms.Lambda(lambda pil_image: center_crop_arr(pil_image, args.img_size)),
-        transforms.CenterCrop(args.img_size),
-        transforms.ToTensor(),
-    ])
+    transform_train = build_center_crop_normalize_transform(args.img_size)
 
     if args.use_hf_dataset:
         from datasets import load_dataset

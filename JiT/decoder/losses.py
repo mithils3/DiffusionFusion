@@ -9,6 +9,10 @@ except ImportError:
     lpips = None
 
 
+def l1_reconstruction_loss(reconstructed: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    return torch.mean(torch.abs(reconstructed - target))
+
+
 def mse_reconstruction_loss(reconstructed: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     return torch.mean((reconstructed - target) ** 2)
 
@@ -67,6 +71,7 @@ class LPIPSLoss(nn.Module):
 
 @dataclass(frozen=True)
 class DecoderLossBreakdown:
+    reconstruction: torch.Tensor
     mse: torch.Tensor
     perceptual: torch.Tensor
     adversarial: torch.Tensor
@@ -86,9 +91,10 @@ def build_decoder_loss_breakdown(
     use_perceptual: bool = True,
     use_adversarial: bool = True,
 ) -> DecoderLossBreakdown:
+    reconstruction = l1_reconstruction_loss(reconstructed, target)
     mse = mse_reconstruction_loss(reconstructed, target)
-    perceptual = zero_loss_like(mse)
-    adversarial = zero_loss_like(mse)
+    perceptual = zero_loss_like(reconstruction)
+    adversarial = zero_loss_like(reconstruction)
 
     if use_perceptual and perceptual_loss_module is not None:
         perceptual = perceptual_loss_module(
@@ -101,8 +107,9 @@ def build_decoder_loss_breakdown(
     if use_adversarial and fake_logits is not None:
         adversarial = vanilla_generator_loss(fake_logits)
 
-    total = mse + perceptual_weight * perceptual + adversarial_weight * adversarial
+    total = reconstruction + perceptual_weight * perceptual + adversarial_weight * adversarial
     return DecoderLossBreakdown(
+        reconstruction=reconstruction,
         mse=mse,
         perceptual=perceptual,
         adversarial=adversarial,

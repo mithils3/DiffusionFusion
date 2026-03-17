@@ -402,6 +402,7 @@ def build_data_loader(
     preload_next_batch: bool,
     image_data_path: str,
     image_model_name: str,
+    image_size: int,
     pin_mem: bool,
 ):
     dataset = RamLoadedShardDataset(
@@ -416,6 +417,7 @@ def build_data_loader(
         preload_next_batch=preload_next_batch,
         image_data_path=image_data_path,
         image_model_name=image_model_name,
+        image_size=image_size,
     )
     loader = torch.utils.data.DataLoader(
         dataset=dataset,
@@ -482,6 +484,7 @@ def main(args: argparse.Namespace) -> None:
         preload_next_batch=args.decoder_batch_prefetch,
         image_data_path=args.image_data_path,
         image_model_name=args.image_model_name,
+        image_size=args.decoder_output_image_size,
         pin_mem=args.pin_mem,
     )
     dataset_eval, data_loader_eval = build_data_loader(
@@ -496,6 +499,7 @@ def main(args: argparse.Namespace) -> None:
         preload_next_batch=args.decoder_batch_prefetch,
         image_data_path=args.image_data_path,
         image_model_name=args.image_model_name,
+        image_size=args.decoder_output_image_size,
         pin_mem=args.pin_mem,
     )
 
@@ -529,7 +533,7 @@ def main(args: argparse.Namespace) -> None:
     model_without_ddp = model.module if hasattr(model, "module") else model
 
     param_groups = misc.add_weight_decay(model_without_ddp, args.weight_decay)
-    optimizer = torch.optim.AdamW(
+    optimizer = torch.optim.Adam(
         param_groups,
         lr=args.lr,
         betas=args.optimizer_betas,

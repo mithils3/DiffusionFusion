@@ -17,7 +17,7 @@ SchedulerType = Literal["cosine"]
 @dataclass(frozen=True)
 class OptimizerConfig:
     lr: float = 2.0e-4
-    betas: tuple[float, float] = (0.9, 0.95)
+    betas: tuple[float, float] = (0.5, 0.9)
     weight_decay: float = 0.0
 
 

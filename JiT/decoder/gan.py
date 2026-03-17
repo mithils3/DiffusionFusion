@@ -214,7 +214,7 @@ def build_decoder_gan_training_state(
             broadcast_buffers=False,
         )
     disc_optimizer_cfg = disc_defaults.optimizer
-    discriminator_optimizer = torch.optim.AdamW(
+    discriminator_optimizer = torch.optim.Adam(
         discriminator.parameters(),
         lr=float(_get_arg_value(args, ("decoder_disc_lr", "disc_lr"), disc_optimizer_cfg.lr)),
         betas=tuple(_get_arg_value(args, ("decoder_disc_betas", "disc_betas"), disc_optimizer_cfg.betas)),

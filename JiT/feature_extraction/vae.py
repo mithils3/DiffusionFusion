@@ -21,13 +21,14 @@ from copy import deepcopy
 from PIL import Image
 from collections import OrderedDict
 import numpy as np
-from torchvision import transforms
 from torchvision.datasets import ImageFolder
 from torch.utils.data.distributed import DistributedSampler
 from torch.utils.data import DataLoader
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 import torch
+
+from JiT.util.image_transforms import build_center_crop_normalize_transform
 # the first flag below was False when we tested this script but True makes A100 training a lot faster:
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -82,27 +83,6 @@ def create_logger(logging_dir):
         logger = logging.getLogger(__name__)
         logger.addHandler(logging.NullHandler())
     return logger
-
-
-def center_crop_arr(pil_image, image_size):
-    """
-    Center cropping implementation from ADM.
-    https://github.com/openai/guided-diffusion/blob/8fb3ad9197f16bbc40620447b2742e13458d2831/guided_diffusion/image_datasets.py#L126
-    """
-    while min(*pil_image.size) >= 2 * image_size:
-        pil_image = pil_image.resize(
-            tuple(x // 2 for x in pil_image.size), resample=Image.BOX
-        )
-
-    scale = image_size / min(*pil_image.size)
-    pil_image = pil_image.resize(
-        tuple(round(x * scale) for x in pil_image.size), resample=Image.BICUBIC
-    )
-
-    arr = np.array(pil_image)
-    crop_y = (arr.shape[0] - image_size) // 2
-    crop_x = (arr.shape[1] - image_size) // 2
-    return Image.fromarray(arr[crop_y: crop_y + image_size, crop_x: crop_x + image_size])
 
 
 #################################################################################
@@ -167,13 +147,11 @@ def main(args):
 
     # Setup data:
     local_batch_size = args.global_batch_size // dist.get_world_size()
-    transform = transforms.Compose([
-        transforms.Lambda(lambda pil_image: center_crop_arr(
-            pil_image, args.image_size)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[
-                             0.5, 0.5, 0.5], inplace=True)
-    ])
+    transform = build_center_crop_normalize_transform(
+        args.image_size,
+        mean=(0.5, 0.5, 0.5),
+        std=(0.5, 0.5, 0.5),
+    )
     dataset = load_dataset(args.data_path, split="train")
     dataset = dataset.with_format("torch")
     dataset = dataset.with_transform(

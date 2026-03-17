@@ -11,6 +11,8 @@ from tqdm import tqdm
 import argparse
 import numpy as np
 
+from JiT.util.image_transforms import build_center_crop_normalize_transform
+
 
 def collate_fn(batch):
     images = torch.stack([b["image"] for b in batch], dim=0)
@@ -71,7 +73,11 @@ def main(args):
 
     local_batch_size = args.global_batch_size // dist.get_world_size()
     data_config = timm.data.resolve_model_data_config(model)
-    transforms = timm.data.create_transform(**data_config, is_training=False)
+    transforms = build_center_crop_normalize_transform(
+        args.image_size,
+        mean=data_config.get("mean"),
+        std=data_config.get("std"),
+    )
     dataset = load_dataset(args.data_path, split="train")
     dataset = dataset.with_transform(
         lambda examples: {

@@ -13,6 +13,8 @@ import torch.distributed as dist
 from datasets import load_dataset, load_from_disk
 from torch.utils.data import IterableDataset
 
+from JiT.util.image_transforms import build_center_crop_normalize_transform
+
 
 def resolve_feature_dataset_root(data_path: str, dataset_dir_name: str) -> str:
     if os.path.isdir(dataset_dir_name):
@@ -74,13 +76,14 @@ def _load_raw_image_dataset(data_path: str):
 
 
 class RawImageStore:
-    """Loads original RGB images using the same transform recipe as DINO feature extraction."""
+    """Loads original RGB images using the shared center-crop decoder recipe."""
 
     def __init__(
         self,
         data_path: str,
         sample_id_store: FeatureShardStore,
         model_name: str = "vit_base_patch16_dinov3.lvd1689m",
+        image_size: int = 256,
     ):
         self.dataset = _load_raw_image_dataset(data_path)
         self.dataset_size = len(self.dataset)
@@ -105,8 +108,11 @@ class RawImageStore:
             features_only=True,
         )
         data_config = timm.data.resolve_model_data_config(transform_model)
-        self.transform = timm.data.create_transform(
-            **data_config, is_training=False)
+        self.transform = build_center_crop_normalize_transform(
+            image_size=image_size,
+            mean=data_config.get("mean"),
+            std=data_config.get("std"),
+        )
         del transform_model
 
     def sample_ids_to_dataset_indices(self, sample_ids: np.ndarray) -> np.ndarray:
@@ -297,6 +303,7 @@ class RamLoadedShardDataset(IterableDataset):
         preload_next_batch: bool = True,
         image_data_path: Optional[str] = None,
         image_model_name: str = "vit_base_patch16_dinov3.lvd1689m",
+        image_size: int = 256,
     ):
         if num_replicas < 0:
             num_replicas = dist.get_world_size() if dist.is_initialized() else 1
@@ -330,6 +337,7 @@ class RamLoadedShardDataset(IterableDataset):
             image_data_path,
             latent_store,
             model_name=image_model_name,
+            image_size=image_size,
         )
 
         self.logical_shard_store = self._select_logical_shard_store()

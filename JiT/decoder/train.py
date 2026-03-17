@@ -403,12 +403,14 @@ def train_epoch(
 
         metric_logger.update(
             loss=total_loss_value,
+            l1=float(loss_breakdown.reconstruction.item()),
             mse=float(loss_breakdown.mse.item()),
             lr=lr,
         )
         step_metrics.update(
             {
                 "loss": total_loss_value,
+                "l1": float(loss_breakdown.reconstruction.item()),
                 "mse": float(loss_breakdown.mse.item()),
             }
         )
@@ -552,7 +554,7 @@ def evaluate(model_without_ddp, args, epoch, vae=None, batch_size=64, log_writer
                     continue
 
                 Image.fromarray(reconstructed_image).save(
-                    os.path.join(eval_output_dir, f"{str(global_index).zfill(5)}.jpg")
+                    os.path.join(eval_output_dir, f"{str(global_index).zfill(5)}.png")
                 )
                 saved_images_local += 1
 

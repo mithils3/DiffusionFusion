@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -J VAE_features
+#SBATCH -J DINO_features
 #SBATCH -A bgnp-dtai-gh
 #SBATCH -p ghx4
 #SBATCH --nodes=1
@@ -27,5 +27,6 @@ torchrun --nproc_per_node=auto --nnodes=1 --node_rank=0 \
 feature_extraction/dinov3.py \
 --data-path ${IMAGENET_PATH}  \
 --features-path ${OUTPUT_DIR} \
+--image-size 256 \
 --num-workers 4 \
 --hf-dataset-name imagenet256_dinov3_features 
