@@ -40,4 +40,4 @@ OMP_NUM_THREADS=16 torchrun \
   --batch_size 96 \
   --epochs 16 \
   --eval_freq 2 \
-  --num_images 2048
+  --num_images 4096
