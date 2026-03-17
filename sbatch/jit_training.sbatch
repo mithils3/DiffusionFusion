@@ -21,7 +21,7 @@ source /u/msalunkhe/.venv/bin/activate
 cd /u/msalunkhe/DiffusionFusion/JiT
 git pull
 IMAGENET_PATH="/work/hdd/bgnp/msalunkhe/data/imagenet/"
-OUTPUT_DIR="/work/nvme/bgnp/msalunkhe/outputs/jit_large_patch_size_2_dino_latent_centercrop"
+OUTPUT_DIR="/work/nvme/bgnp/msalunkhe/outputs/jit_large_patch_size_2_dino_latent_naive"
 mkdir -p "${OUTPUT_DIR}"
 OMP_NUM_THREADS=16 torchrun \
 --nproc_per_node=auto \
