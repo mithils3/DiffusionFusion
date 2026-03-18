@@ -55,14 +55,14 @@ class DecoderTrainingConfig:
 
 @dataclass(frozen=True)
 class DiscriminatorArchConfig:
-    backbone_model_name: str = "vit_small_patch8_224.dino"
+    backbone_model_name: str = "timm/vit_small_patch16_dinov3.lvd1689m"
     dino_ckpt_path: str | None = None
-    input_size: int = 224
+    input_size: int = 256
     feature_dim: int = 384
     ks: int = 9
     norm_type: NormType = "gn"
     using_spec_norm: bool = True
-    recipe: str = "S_8"
+    recipe: str = "S_16"
     freeze_backbone: bool = False
 
     def build_kwargs(self) -> dict[str, object]:

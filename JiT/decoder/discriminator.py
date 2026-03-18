@@ -129,9 +129,9 @@ class DinoPatchDiscriminator(nn.Module):
 
     def __init__(
         self,
-        backbone_model_name: str = "vit_small_patch8_224.dino",
+        backbone_model_name: str = "timm/vit_small_patch16_dinov3.lvd1689m",
         checkpoint_path: str | None = None,
-        input_size: int = 224,
+        input_size: int = 256,
         feature_dim: int = 384,
         kernel_size: int = 9,
         norm_type: str = "gn",
@@ -225,13 +225,15 @@ class DinoPatchDiscriminator(nn.Module):
         return (images - self.backbone_mean) / self.backbone_std
 
     def forward_features(self, images: torch.Tensor) -> torch.Tensor:
-        resized = F.interpolate(
-            self._normalize_backbone_input(images),
-            size=(self.input_size, self.input_size),
-            mode="bilinear",
-            align_corners=False,
-        )
-        features = self.backbone.forward_features(resized)
+        normalized = self._normalize_backbone_input(images)
+        if normalized.shape[-2:] != (self.input_size, self.input_size):
+            normalized = F.interpolate(
+                normalized,
+                size=(self.input_size, self.input_size),
+                mode="bilinear",
+                align_corners=False,
+            )
+        features = self.backbone.forward_features(normalized)
         prefix_tokens = int(getattr(self.backbone, "num_prefix_tokens", 0) or 0)
         patch_embed = getattr(self.backbone, "patch_embed", None)
         patch_grid_size = getattr(patch_embed, "grid_size", None)

@@ -171,24 +171,24 @@ The decoder is trained in a separate stage from the DiT. Freeze both encoders (D
 
 ## Discriminator
 
-The discriminator is not a standard PatchGAN. It is built on a pretrained DINO ViT-Small with patch size 8, following RAE.
+The discriminator is not a standard PatchGAN. It is built on a pretrained DINOv3 ViT-Small with patch size 16.
 
-**Backbone.** A pretrained DINO ViT-S/8 processes the image (real or reconstructed) at 224x224. With patch size 8, this produces a 28x28 grid of 384-dim feature tokens. This is a different DINO model than the encoder: the encoder uses DINOv2-Base with patch 16 giving a 16x16 grid at 768-dim. The discriminator's ViT-S/8 sees the image at much higher spatial resolution (28x28 vs 16x16), which lets it catch fine-grained artifacts that the encoder's representation would not capture.
+**Backbone.** A pretrained DINOv3 ViT-S/16 processes the image (real or reconstructed) at 256x256. With patch size 16, this produces a 16x16 grid of 384-dim feature tokens. In the default decoder setup the discriminator now consumes the native 256x256 image directly, so there is no extra bilinear resize before the backbone. A resize is only applied if a non-native input size is configured later.
 
-**Convolutional head.** On top of the DINO feature map `(B, 384, 28, 28)`, a convolutional projection with kernel size 9 slides over the spatial grid and produces a real/fake logit at each position. Batch normalization and spectral normalization are applied. Spectral normalization constrains the Lipschitz constant of the conv layers, preventing the discriminator from producing extreme gradients and stabilizing GAN training.
+**Convolutional head.** On top of the DINO feature map `(B, 384, 16, 16)`, a convolutional projection with kernel size 9 slides over the spatial grid and produces a real/fake logit at each position. Group normalization and spectral normalization are applied. Spectral normalization constrains the Lipschitz constant of the conv layers, preventing the discriminator from producing extreme gradients and stabilizing GAN training.
 
-**Output.** A spatial map of real/fake logits. Each position in the output map corresponds to a region of the image and predicts whether that region looks real or reconstructed. This is patch-based in that it outputs per-region predictions, but the patches are defined in DINO feature space, not raw pixel space. Each prediction is informed by a 9x9 region of DINO features, which covers a much larger receptive field in pixel space since each DINO token already sees its 8x8 patch plus global context from self-attention.
+**Output.** A spatial map of real/fake logits. Each position in the output map corresponds to a region of the image and predicts whether that region looks real or reconstructed. This is patch-based in that it outputs per-region predictions, but the patches are defined in DINO feature space, not raw pixel space. Each prediction is informed by a 9x9 region of DINO features, which covers a much larger receptive field in pixel space since each DINO token already sees its 16x16 patch plus global context from self-attention.
 
 **Why DINO features instead of raw pixels.** A raw convolutional discriminator has to learn visual features from scratch. By starting from DINO features, the discriminator already operates in a perceptually meaningful space that captures texture, edges, object parts, and semantic structure. It can immediately focus on the perceptually meaningful differences between real and reconstructed images rather than spending capacity learning basic visual features.
 
 ```
-Image (real or reconstructed, 224×224)
+Image (real or reconstructed, 256×256)
         │
         ▼
-  DINO ViT-S/8 backbone
+ DINOv3 ViT-S/16 backbone
         │
         ▼
-  (B, 384, 28, 28) feature map
+  (B, 384, 16, 16) feature map
         │
         ▼
   Conv head (kernel 9×9)
@@ -298,11 +298,14 @@ training:
 gan:
   disc:
     arch:
-      dino_ckpt_path: dino_vit_small_patch8_224.pth
+      backbone_model_name: timm/vit_small_patch16_dinov3.lvd1689m
+      dino_ckpt_path: null
+      input_size: 256
+      feature_dim: 384
       ks: 9
-      norm_type: bn
+      norm_type: gn
       using_spec_norm: true
-      recipe: S_8
+      recipe: S_16
     optimizer:
       lr: 2.0e-4
       betas: [0.9, 0.95]
