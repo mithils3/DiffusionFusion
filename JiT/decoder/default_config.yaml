@@ -51,12 +51,12 @@ gan:
   loss:
     disc_loss: hinge
     gen_loss: vanilla
-    disc_weight: 0.75
+    disc_weight: 1.0
     perceptual_weight: 1.0
     adaptive_weight: true
     disc_start: 8
     disc_upd_start: 6
-    adversarial_warmup_epochs: 1.0
+    adversarial_warmup_epochs: 2.0
     lpips_start: 0
-    max_d_weight: 4.0
+    max_d_weight: 2.0
     disc_updates: 1
