@@ -23,7 +23,7 @@ git pull
 IMAGE_DATA_PATH="ILSVRC/imagenet-1k"
 
 FEATURE_ROOT="/work/hdd/bgnp/msalunkhe/data/imagenet"
-OUTPUT_DIR="/work/nvme/bgnp/msalunkhe/outputs/jit_decoder_small_gan"
+OUTPUT_DIR="/work/nvme/bgnp/msalunkhe/outputs/jit_decoder_small_gan_lower_noise"
 mkdir -p "${OUTPUT_DIR}"
 
 OMP_NUM_THREADS=16 torchrun \
