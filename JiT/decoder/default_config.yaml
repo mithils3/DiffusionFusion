@@ -7,7 +7,7 @@ decoder:
   patch_size: 16
   latent_patch_size: 2
   output_image_size: 256
-  noise_tau: 0.8
+  noise_tau: 0.4
 
 training:
   epochs: 16

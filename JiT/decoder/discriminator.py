@@ -56,7 +56,12 @@ def _load_checkpoint_if_present(module: nn.Module, checkpoint_path: str | None) 
     module.load_state_dict(state_dict, strict=False)
 
 
-def _tokens_to_feature_map(features: Any) -> torch.Tensor:
+def _tokens_to_feature_map(
+    features: Any,
+    *,
+    num_prefix_tokens: int = 0,
+    patch_grid_size: tuple[int, int] | None = None,
+) -> torch.Tensor:
     if isinstance(features, dict):
         for key in (
             "x_norm_patchtokens",
@@ -79,6 +84,9 @@ def _tokens_to_feature_map(features: Any) -> torch.Tensor:
         )
 
     if features.ndim == 4:
+        # Swin-style backbones often return NHWC feature maps; conv heads expect NCHW.
+        if features.shape[-1] > max(features.shape[1], features.shape[2]):
+            return features.permute(0, 3, 1, 2).contiguous()
         return features
 
     if features.ndim != 3:
@@ -88,11 +96,25 @@ def _tokens_to_feature_map(features: Any) -> torch.Tensor:
 
     batch_size, token_count, channels = features.shape
     grid_tokens = features
+
+    if patch_grid_size is not None:
+        grid_h, grid_w = int(patch_grid_size[0]), int(patch_grid_size[1])
+        expected_token_count = grid_h * grid_w
+        if token_count == expected_token_count:
+            return grid_tokens.transpose(1, 2).reshape(batch_size, channels, grid_h, grid_w)
+        if num_prefix_tokens > 0 and token_count - num_prefix_tokens == expected_token_count:
+            grid_tokens = features[:, num_prefix_tokens:, :]
+            return grid_tokens.transpose(1, 2).reshape(batch_size, channels, grid_h, grid_w)
+
     grid_size = int(math.sqrt(token_count))
     if grid_size * grid_size != token_count:
-        grid_tokens = features[:, 1:, :]
-        token_count = grid_tokens.shape[1]
-        grid_size = int(math.sqrt(token_count))
+        for prefix_count in range(max(1, num_prefix_tokens), min(token_count, 16) + 1):
+            remaining = token_count - prefix_count
+            grid_size = int(math.sqrt(remaining))
+            if grid_size * grid_size == remaining:
+                grid_tokens = features[:, prefix_count:, :]
+                token_count = remaining
+                break
 
     if grid_size * grid_size != token_count:
         raise ValueError(
@@ -210,7 +232,14 @@ class DinoPatchDiscriminator(nn.Module):
             align_corners=False,
         )
         features = self.backbone.forward_features(resized)
-        feature_map = _tokens_to_feature_map(features)
+        prefix_tokens = int(getattr(self.backbone, "num_prefix_tokens", 0) or 0)
+        patch_embed = getattr(self.backbone, "patch_embed", None)
+        patch_grid_size = getattr(patch_embed, "grid_size", None)
+        feature_map = _tokens_to_feature_map(
+            features,
+            num_prefix_tokens=prefix_tokens,
+            patch_grid_size=patch_grid_size,
+        )
         if feature_map.shape[1] != self.feature_dim:
             raise ValueError(
                 f"Expected discriminator feature dim {self.feature_dim}, got {feature_map.shape[1]}."

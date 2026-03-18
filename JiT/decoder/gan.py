@@ -63,8 +63,16 @@ def apply_noise_augmentation(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if noise_tau <= 0.0:
         return latent, dino
-    latent = latent + noise_tau * torch.randn_like(latent)
-    dino = dino + noise_tau * torch.randn_like(dino)
+
+    batch_size = latent.shape[0]
+    latent_sigma = latent.new_empty(batch_size).normal_(mean=0.0, std=noise_tau).abs_()
+    dino_sigma = latent_sigma.to(device=dino.device, dtype=dino.dtype)
+
+    latent_sigma = latent_sigma.view(batch_size, *([1] * (latent.ndim - 1)))
+    dino_sigma = dino_sigma.view(batch_size, *([1] * (dino.ndim - 1)))
+
+    latent = latent + latent_sigma * torch.randn_like(latent)
+    dino = dino + dino_sigma * torch.randn_like(dino)
     return latent, dino
 
 

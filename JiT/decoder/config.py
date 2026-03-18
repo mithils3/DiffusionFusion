@@ -41,7 +41,7 @@ class DecoderModelConfig:
     patch_size: int = 16
     latent_patch_size: int = 2
     output_image_size: int = 256
-    noise_tau: float = 0.8
+    noise_tau: float = 0.4
 
 
 @dataclass(frozen=True)
