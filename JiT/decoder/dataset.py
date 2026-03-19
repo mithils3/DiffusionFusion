@@ -60,17 +60,14 @@ def _parse_rank_from_shard_path(path: str) -> int:
 
 def _load_raw_image_dataset(data_path: str):
     if os.path.isdir(data_path):
-        try:
-            dataset = load_from_disk(data_path)
-            if hasattr(dataset, "keys"):
-                if "train" not in dataset:
-                    raise KeyError(
-                        f'Expected a "train" split in decoder image dataset at {data_path}.'
-                    )
-                return dataset["train"]
-            return dataset
-        except Exception:
-            pass
+        dataset = load_from_disk(data_path)
+        if hasattr(dataset, "keys"):
+            if "train" not in dataset:
+                raise KeyError(
+                    f'Expected a "train" split in decoder image dataset at {data_path}.'
+                )
+            return dataset["train"]
+        return dataset
 
     return load_dataset(data_path, split="train")
 

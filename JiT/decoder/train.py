@@ -2,9 +2,7 @@ from contextlib import nullcontext
 from itertools import islice
 import math
 import os
-from pathlib import Path
 import shutil
-import sys
 import time
 
 import torch
@@ -36,11 +34,6 @@ try:
     import torch_fidelity
 except ImportError:
     torch_fidelity = None
-
-_DEFAULT_IMAGE_MEAN = (0.485, 0.456, 0.406)
-_DEFAULT_IMAGE_STD = (0.229, 0.224, 0.225)
-_JIT_FID_STATS_DIR = Path(__file__).resolve().parents[1] / "fid_stats"
-
 
 def _dist_barrier():
     if misc.is_dist_avail_and_initialized():
@@ -105,7 +98,7 @@ def _resolve_gan_state(
 ) -> DecoderGanTrainingState | None:
     if gan_state is not None:
         return gan_state
-    if not bool(getattr(args, "decoder_use_gan", True)):
+    if not args.decoder_use_gan:
         return None
 
     base_model = _unwrap_model(model)
@@ -117,29 +110,24 @@ def _resolve_gan_state(
 
 
 def _extract_image_normalization(data_loader):
-    dataset = getattr(data_loader, "dataset", None)
-    image_store = getattr(dataset, "image_store", None)
-    transform = getattr(image_store, "transform", None)
-    transform_steps = getattr(transform, "transforms", None)
+    try:
+        transform_steps = data_loader.dataset.image_store.transform.transforms
+    except AttributeError as exc:
+        raise AttributeError(
+            "Decoder dataloader must expose dataset.image_store.transform.transforms."
+        ) from exc
 
-    if transform_steps is not None:
-        for step in reversed(transform_steps):
-            mean = getattr(step, "mean", None)
-            std = getattr(step, "std", None)
-            if mean is not None and std is not None:
-                return (
-                    torch.as_tensor(mean, dtype=torch.float32).view(1, -1, 1, 1),
-                    torch.as_tensor(std, dtype=torch.float32).view(1, -1, 1, 1),
-                )
+    for step in reversed(transform_steps):
+        mean = getattr(step, "mean", None)
+        std = getattr(step, "std", None)
+        if mean is not None and std is not None:
+            return (
+                torch.as_tensor(mean, dtype=torch.float32).view(1, -1, 1, 1),
+                torch.as_tensor(std, dtype=torch.float32).view(1, -1, 1, 1),
+            )
 
-    if misc.is_main_process():
-        print(
-            "Decoder eval could not infer image normalization from the data loader; "
-            "falling back to ImageNet mean/std."
-        )
-    return (
-        torch.tensor(_DEFAULT_IMAGE_MEAN, dtype=torch.float32).view(1, -1, 1, 1),
-        torch.tensor(_DEFAULT_IMAGE_STD, dtype=torch.float32).view(1, -1, 1, 1),
+    raise ValueError(
+        "Decoder dataloader transform must include a normalization step with mean/std."
     )
 
 
@@ -151,56 +139,9 @@ def _images_to_uint8(images, mean, std):
     return images.permute(0, 2, 3, 1).numpy()
 
 
-def _resolve_eval_data_loader(vae, data_loader):
-    if data_loader is not None:
-        return data_loader
-
-    if vae is not None and hasattr(vae, "__iter__") and not hasattr(vae, "decode"):
-        return vae
-
-    raise ValueError(
-        "Decoder evaluation requires an eval data_loader. Pass it via data_loader=..."
-    )
-
-
-def _resolve_decoder_reference_dir(args):
-    for attr_name in (
-        "decoder_eval_reference_dir",
-        "eval_reference_dir",
-        "reference_dir",
-        "fid_ref_dir",
-        "ref_dir",
-    ):
-        reference_dir = getattr(args, attr_name, None)
-        if reference_dir:
-            return reference_dir
-    return None
-
-
-def _resolve_decoder_fid_stats_file(args):
-    for attr_name in (
-        "decoder_eval_fid_stats",
-        "eval_fid_stats",
-        "fid_statistics_file",
-    ):
-        fid_stats_path = getattr(args, attr_name, None)
-        if fid_stats_path:
-            return fid_stats_path
-
-    image_size = int(getattr(args, "decoder_output_image_size", 256))
-    for candidate in (
-        Path(f"/work/nvme/betw/msalunkhe/data/jit_in{image_size}_stats.npz"),
-        _JIT_FID_STATS_DIR / f"jit_in{image_size}_stats.npz",
-    ):
-        if candidate.is_file():
-            return str(candidate)
-    return None
-
-
 def _raise_if_not_finite(loss_value: float, label: str):
     if not math.isfinite(loss_value):
-        print(f"{label} is {loss_value}, stopping training")
-        sys.exit(1)
+        raise FloatingPointError(f"{label} is not finite: {loss_value}")
 
 
 def _reduce_metrics(metrics: dict[str, float]) -> dict[str, float]:
@@ -469,7 +410,16 @@ def train_epoch(
     print("Finished")
 
 
-def evaluate(model_without_ddp, args, epoch, vae=None, batch_size=64, log_writer=None, wandb_run=None, wandb_step=None, data_loader=None):
+def evaluate(
+    model_without_ddp,
+    args,
+    epoch,
+    *,
+    data_loader,
+    log_writer=None,
+    wandb_run=None,
+    wandb_step=None,
+):
     print("Start evaluation at epoch {}".format(epoch))
     model_without_ddp.eval()
     if not hasattr(model_without_ddp, "generate"):
@@ -477,12 +427,11 @@ def evaluate(model_without_ddp, args, epoch, vae=None, batch_size=64, log_writer
             "Decoder evaluation expects model_without_ddp.generate(latent, dino) "
             "to return reconstructed images."
         )
-    data_loader = _resolve_eval_data_loader(vae, data_loader)
     device = next(model_without_ddp.parameters()).device
     world_size = misc.get_world_size()
     local_rank = misc.get_rank()
-    eval_batch_size = getattr(getattr(data_loader, "dataset", None), "batch_size", batch_size)
-    requested_num_images = int(getattr(args, "num_images", 0) or 0)
+    eval_batch_size = data_loader.dataset.batch_size
+    requested_num_images = int(args.num_images or 0)
     total_available_steps = len(data_loader)
     total_available_images = total_available_steps * eval_batch_size * world_size
     target_num_images = requested_num_images if requested_num_images > 0 else total_available_images
@@ -500,8 +449,7 @@ def evaluate(model_without_ddp, args, epoch, vae=None, batch_size=64, log_writer
         total_available_steps,
         math.ceil(target_num_images / (eval_batch_size * world_size)),
     )
-    eval_image_interval = max(1, getattr(
-        args, "wandb_eval_image_interval", 10))
+    eval_image_interval = max(1, args.wandb_eval_image_interval)
     wandb_table = None
     if misc.is_main_process() and wandb_run is not None:
         if wandb is None:
@@ -520,7 +468,7 @@ def evaluate(model_without_ddp, args, epoch, vae=None, batch_size=64, log_writer
             ]
         )
 
-    eval_root = args.output_dir if getattr(args, "output_dir", None) else "."
+    eval_root = args.output_dir if args.output_dir else "."
     eval_output_dir = os.path.join(
         eval_root,
         f"decoder-eval-reconstructions-epoch{int(epoch):04d}-images{target_num_images}",
@@ -546,8 +494,8 @@ def evaluate(model_without_ddp, args, epoch, vae=None, batch_size=64, log_writer
             latent = batch["latent"].to(device, non_blocking=True)
             dino = batch["dino"].to(device, non_blocking=True)
             target_image = batch["image"].to(device, non_blocking=True)
-            labels = batch.get("y")
-            sample_ids = batch.get("sample_id")
+            labels = batch["y"]
+            sample_ids = batch["sample_id"]
 
             with _autocast_context(device):
                 reconstructed = model_without_ddp.generate(latent, dino)
@@ -575,8 +523,8 @@ def evaluate(model_without_ddp, args, epoch, vae=None, batch_size=64, log_writer
                 saved_images_local += 1
 
                 if wandb_table is not None and global_index % eval_image_interval == 0:
-                    class_id = int(labels[sample_idx]) if labels is not None else -1
-                    sample_id = int(sample_ids[sample_idx]) if sample_ids is not None else -1
+                    class_id = int(labels[sample_idx])
+                    sample_id = int(sample_ids[sample_idx])
                     wandb_table.add_data(
                         epoch,
                         global_index,
@@ -618,9 +566,16 @@ def evaluate(model_without_ddp, args, epoch, vae=None, batch_size=64, log_writer
     if wandb_table is not None and len(wandb_table.data) > 0:
         log_payload["eval/samples{}".format(postfix)] = wandb_table
 
-    reference_dir = _resolve_decoder_reference_dir(args)
-    fid_statistics_file = _resolve_decoder_fid_stats_file(args)
-    distribution_metrics_requested = bool(reference_dir or fid_statistics_file)
+    reference_dir = args.decoder_eval_reference_dir
+    fid_statistics_file = args.decoder_eval_fid_stats
+    if reference_dir and fid_statistics_file:
+        raise ValueError(
+            "Specify only one decoder eval reference source: "
+            "--decoder_eval_reference_dir or --decoder_eval_fid_stats."
+        )
+    distribution_metrics_requested = args.decoder_eval_metrics and bool(
+        reference_dir or fid_statistics_file
+    )
     metrics_done_path = os.path.join(
         eval_root,
         f".decoder_eval_metrics_done_epoch_{int(epoch):05d}",
@@ -675,7 +630,7 @@ def evaluate(model_without_ddp, args, epoch, vae=None, batch_size=64, log_writer
             f.write(f"{recon_mse},{fid},{inception_score}\n")
     elif distribution_metrics_requested:
         wait_start = time.time()
-        wait_timeout = float(getattr(args, "dist_timeout_sec", 7200))
+        wait_timeout = float(args.dist_timeout_sec)
         while not os.path.exists(metrics_done_path):
             if time.time() - wait_start > wait_timeout:
                 raise RuntimeError(
@@ -684,10 +639,9 @@ def evaluate(model_without_ddp, args, epoch, vae=None, batch_size=64, log_writer
             time.sleep(1.0)
     elif misc.is_main_process():
         print("Decoder eval metrics | Recon MSE: {:.6f}".format(recon_mse))
-        if getattr(args, "decoder_eval_metrics", True):
+        if args.decoder_eval_metrics:
             print(
-                "Skipping FID/IS because no decoder eval reference directory or FID stats file was provided. "
-                "Set args.decoder_eval_reference_dir or args.decoder_eval_fid_stats."
+                "Skipping FID/IS because no decoder eval reference directory or FID stats file was provided."
             )
 
     if wandb_run is not None:

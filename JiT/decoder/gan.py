@@ -7,31 +7,9 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 import JiT.util.misc as misc
 
 from .augment import DiscriminatorAugment
-from .config import DecoderLossConfig, DecoderPlanConfig, default_decoder_plan_config
+from .config import DecoderLossConfig
 from .discriminator import DinoPatchDiscriminator
 from .losses import LPIPSLoss
-
-
-def _get_arg_value(args, names: tuple[str, ...], default):
-    for name in names:
-        if hasattr(args, name):
-            value = getattr(args, name)
-            if value is not None:
-                return value
-    return default
-
-
-def _resolve_decoder_plan(args) -> DecoderPlanConfig:
-    plan = getattr(args, "decoder_plan", None)
-    if isinstance(plan, DecoderPlanConfig):
-        return plan
-    return default_decoder_plan_config()
-
-
-def _normalize_optional_path(value):
-    if value in ("", None):
-        return None
-    return str(value)
 
 
 @dataclass
@@ -134,86 +112,34 @@ def build_decoder_gan_training_state(
     args,
     device: torch.device,
 ) -> DecoderGanTrainingState:
-    plan = _resolve_decoder_plan(args)
-    loss_defaults = plan.gan.loss
+    plan = args.decoder_plan
     disc_defaults = plan.gan.disc
-    train_defaults = plan.training
-    decoder_defaults = plan.decoder
 
     loss_config = DecoderLossConfig(
-        disc_loss=_get_arg_value(args, ("decoder_disc_loss", "disc_loss"), loss_defaults.disc_loss),
-        gen_loss=_get_arg_value(args, ("decoder_gen_loss", "gen_loss"), loss_defaults.gen_loss),
-        disc_weight=float(_get_arg_value(args, ("decoder_disc_weight", "disc_weight"), loss_defaults.disc_weight)),
-        perceptual_weight=float(
-            _get_arg_value(args, ("decoder_perceptual_weight", "perceptual_weight"), loss_defaults.perceptual_weight)
-        ),
-        adaptive_weight=bool(
-            _get_arg_value(args, ("decoder_adaptive_weight", "adaptive_d_weight"), loss_defaults.adaptive_weight)
-        ),
-        disc_start=int(_get_arg_value(args, ("decoder_disc_start", "disc_start"), loss_defaults.disc_start)),
-        disc_upd_start=int(
-            _get_arg_value(args, ("decoder_disc_upd_start", "disc_upd_start"), loss_defaults.disc_upd_start)
-        ),
-        adversarial_warmup_epochs=float(
-            _get_arg_value(
-                args,
-                ("decoder_adversarial_warmup_epochs", "adversarial_warmup_epochs"),
-                loss_defaults.adversarial_warmup_epochs,
-            )
-        ),
-        lpips_start=int(_get_arg_value(args, ("decoder_lpips_start", "lpips_start"), loss_defaults.lpips_start)),
-        max_d_weight=float(_get_arg_value(args, ("decoder_max_d_weight", "max_d_weight"), loss_defaults.max_d_weight)),
-        disc_updates=int(_get_arg_value(args, ("decoder_disc_updates", "disc_updates"), loss_defaults.disc_updates)),
+        disc_loss=args.decoder_disc_loss,
+        gen_loss=args.decoder_gen_loss,
+        disc_weight=float(args.decoder_disc_weight),
+        perceptual_weight=float(args.decoder_perceptual_weight),
+        adaptive_weight=bool(args.decoder_adaptive_weight),
+        disc_start=int(args.decoder_disc_start),
+        disc_upd_start=int(args.decoder_disc_upd_start),
+        adversarial_warmup_epochs=float(args.decoder_adversarial_warmup_epochs),
+        lpips_start=int(args.decoder_lpips_start),
+        max_d_weight=float(args.decoder_max_d_weight),
+        disc_updates=int(args.decoder_disc_updates),
+        r1_weight=float(plan.gan.loss.r1_weight),
     )
 
-    disc_arch = disc_defaults.arch
-    disc_checkpoint_path = _normalize_optional_path(
-        _get_arg_value(
-            args,
-            ("decoder_disc_ckpt_path", "decoder_disc_checkpoint_path"),
-            disc_arch.dino_ckpt_path,
-        )
-    )
     discriminator = DinoPatchDiscriminator(
-        backbone_model_name=str(
-            _get_arg_value(
-                args,
-                ("decoder_disc_backbone_model_name",),
-                disc_arch.backbone_model_name,
-            )
-        ),
-        checkpoint_path=disc_checkpoint_path,
-        input_size=int(
-            _get_arg_value(args, ("decoder_disc_input_size",), disc_arch.input_size)
-        ),
-        feature_dim=int(
-            _get_arg_value(args, ("decoder_disc_feature_dim",), disc_arch.feature_dim)
-        ),
-        kernel_size=int(
-            _get_arg_value(
-                args,
-                ("decoder_disc_kernel_size", "decoder_disc_ks"),
-                disc_arch.ks,
-            )
-        ),
-        norm_type=str(
-            _get_arg_value(args, ("decoder_disc_norm_type",), disc_arch.norm_type)
-        ),
-        using_spec_norm=bool(
-            _get_arg_value(
-                args,
-                ("decoder_disc_using_spec_norm",),
-                disc_arch.using_spec_norm,
-            )
-        ),
-        freeze_backbone=bool(
-            _get_arg_value(
-                args,
-                ("decoder_disc_freeze_backbone",),
-                disc_arch.freeze_backbone,
-            )
-        ),
-        pretrained=bool(_get_arg_value(args, ("decoder_disc_pretrained",), True)),
+        backbone_model_name=args.decoder_disc_backbone_model_name,
+        checkpoint_path=args.decoder_disc_ckpt_path,
+        input_size=int(args.decoder_disc_input_size),
+        feature_dim=int(args.decoder_disc_feature_dim),
+        kernel_size=int(args.decoder_disc_kernel_size),
+        norm_type=args.decoder_disc_norm_type,
+        using_spec_norm=bool(args.decoder_disc_using_spec_norm),
+        freeze_backbone=bool(args.decoder_disc_freeze_backbone),
+        pretrained=bool(args.decoder_disc_pretrained),
     ).to(device)
     if misc.is_dist_avail_and_initialized():
         device_ids = [device.index] if device.type == "cuda" and device.index is not None else None
@@ -222,24 +148,19 @@ def build_decoder_gan_training_state(
             device_ids=device_ids,
             broadcast_buffers=False,
         )
-    disc_optimizer_cfg = disc_defaults.optimizer
     discriminator_optimizer = torch.optim.Adam(
         discriminator.parameters(),
-        lr=float(_get_arg_value(args, ("decoder_disc_lr", "disc_lr"), disc_optimizer_cfg.lr)),
-        betas=tuple(_get_arg_value(args, ("decoder_disc_betas", "disc_betas"), disc_optimizer_cfg.betas)),
-        weight_decay=float(
-            _get_arg_value(args, ("decoder_disc_weight_decay", "disc_weight_decay"), disc_optimizer_cfg.weight_decay)
-        ),
+        lr=float(args.decoder_disc_lr),
+        betas=args.decoder_disc_betas,
+        weight_decay=float(args.decoder_disc_weight_decay),
     )
 
-    lpips_net = str(_get_arg_value(args, ("decoder_lpips_net", "lpips_net"), "vgg"))
     perceptual_loss = None
     if loss_config.perceptual_weight > 0.0:
-        perceptual_loss = LPIPSLoss(net=lpips_net).to(device)
+        perceptual_loss = LPIPSLoss(net=args.decoder_lpips_net).to(device)
 
-    augment_cfg = disc_defaults.augment
     discriminator_augment = DiscriminatorAugment(
-        **augment_cfg.build_kwargs()
+        **disc_defaults.augment.build_kwargs()
     ).to(device)
 
     return DecoderGanTrainingState(
@@ -248,15 +169,11 @@ def build_decoder_gan_training_state(
         discriminator_optimizer=discriminator_optimizer,
         perceptual_loss=perceptual_loss,
         discriminator_augment=discriminator_augment,
-        noise_tau=float(_get_arg_value(args, ("decoder_noise_tau", "noise_tau"), decoder_defaults.noise_tau)),
-        disc_lr=float(_get_arg_value(args, ("decoder_disc_lr", "disc_lr"), disc_optimizer_cfg.lr)),
-        disc_min_lr=float(_get_arg_value(args, ("decoder_disc_min_lr", "disc_min_lr"), train_defaults.scheduler.final_lr)),
-        disc_warmup_epochs=int(
-            _get_arg_value(args, ("decoder_disc_warmup_epochs", "warmup_epochs"), train_defaults.scheduler.warmup_epochs)
-        ),
-        disc_total_epochs=int(_get_arg_value(args, ("decoder_disc_epochs", "epochs"), train_defaults.epochs)),
-        disc_lr_schedule=str(_get_arg_value(args, ("decoder_disc_lr_schedule", "lr_schedule"), train_defaults.scheduler.type)),
-        disc_lr_epoch_offset=float(
-            _get_arg_value(args, ("decoder_disc_lr_epoch_offset",), loss_config.disc_upd_start)
-        ),
+        noise_tau=float(args.decoder_noise_tau),
+        disc_lr=float(args.decoder_disc_lr),
+        disc_min_lr=float(args.decoder_disc_min_lr),
+        disc_warmup_epochs=int(args.decoder_disc_warmup_epochs),
+        disc_total_epochs=int(args.decoder_disc_epochs),
+        disc_lr_schedule=str(args.decoder_disc_lr_schedule),
+        disc_lr_epoch_offset=float(loss_config.disc_upd_start),
     )

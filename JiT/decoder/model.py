@@ -172,26 +172,16 @@ class Decoder(nn.Module):
 class DecoderReconstructionModel(nn.Module):
     """Wrap a decoder with the train/eval API used by ``JiT/decoder/train.py``."""
 
-    def __init__(self, decoder: nn.Module, loss_fn: nn.Module | None = None) -> None:
+    def __init__(self, decoder: nn.Module) -> None:
         super().__init__()
         self.decoder = decoder
-        self.loss_fn = loss_fn if loss_fn is not None else nn.MSELoss()
-
-    def reconstruct(self, latent, dino):
-        return self.decoder.generate(latent, dino)
 
     def generate(self, latent, dino):
         """Reconstruct RGB images from aligned latent and DINO features."""
-        return self.reconstruct(latent, dino)
+        return self.decoder.generate(latent, dino)
 
-    def forward(self, latent, dino, image=None):
-        reconstructed = self.generate(latent, dino)
-        if image is None:
-            return reconstructed
-        return self.loss_fn(reconstructed, image)
-
-    def get_last_layer(self):
-        return self.decoder.final_layer.linear.weight
+    def forward(self, latent, dino):
+        return self.generate(latent, dino)
 
 
 class CrossAttention(nn.Module):
