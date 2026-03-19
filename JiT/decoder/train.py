@@ -3,7 +3,7 @@ import os
 import shutil
 import time
 from collections.abc import Callable
-from contextlib import nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from itertools import islice
 
 import torch
@@ -45,6 +45,23 @@ def _autocast_context(device: torch.device):
     if device.type == "cuda":
         return torch.autocast("cuda", dtype=torch.bfloat16)
     return nullcontext()
+
+
+@contextmanager
+def _discriminator_forward_context(
+    device: torch.device,
+    *,
+    needs_second_order: bool,
+):
+    """Use an unfused SDPA path when discriminator training needs second-order grads."""
+    with ExitStack() as stack:
+        if needs_second_order and device.type == "cuda":
+            stack.enter_context(
+                torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.MATH)
+            )
+        else:
+            stack.enter_context(_autocast_context(device))
+        yield
 
 
 def _unwrap_model(model):
@@ -184,7 +201,10 @@ def _discriminator_step(
     if r1_weight > 0.0:
         real_disc_images = real_disc_images.float().requires_grad_(True)
 
-    with _autocast_context(device):
+    with _discriminator_forward_context(
+        device,
+        needs_second_order=r1_weight > 0.0,
+    ):
         fake_logits, real_logits = discriminator(fake_disc_images, real_disc_images)
         disc_loss = hinge_discriminator_loss(real_logits, fake_logits)
 
