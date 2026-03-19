@@ -7,7 +7,7 @@ decoder:
   patch_size: 16
   latent_patch_size: 2
   output_image_size: 256
-  noise_tau: 0.4
+  noise_tau: 0.2
 
 training:
   epochs: 16
@@ -51,12 +51,13 @@ gan:
   loss:
     disc_loss: hinge
     gen_loss: vanilla
-    disc_weight: 1.0
+    disc_weight: 1.5
     perceptual_weight: 1.0
     adaptive_weight: true
-    disc_start: 8
-    disc_upd_start: 6
+    disc_start: 4
+    disc_upd_start: 3
     adversarial_warmup_epochs: 2.0
     lpips_start: 0
-    max_d_weight: 2.0
+    max_d_weight: 5.0
     disc_updates: 1
+    r1_weight: 10.0

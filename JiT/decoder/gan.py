@@ -47,6 +47,7 @@ class DecoderGanTrainingState:
     disc_warmup_epochs: int
     disc_total_epochs: int
     disc_lr_schedule: str
+    disc_lr_epoch_offset: float
 
 
 def set_requires_grad(module: nn.Module | None, flag: bool) -> None:
@@ -255,4 +256,7 @@ def build_decoder_gan_training_state(
         ),
         disc_total_epochs=int(_get_arg_value(args, ("decoder_disc_epochs", "epochs"), train_defaults.epochs)),
         disc_lr_schedule=str(_get_arg_value(args, ("decoder_disc_lr_schedule", "lr_schedule"), train_defaults.scheduler.type)),
+        disc_lr_epoch_offset=float(
+            _get_arg_value(args, ("decoder_disc_lr_epoch_offset",), loss_config.disc_upd_start)
+        ),
     )

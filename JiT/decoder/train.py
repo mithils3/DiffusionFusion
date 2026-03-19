@@ -23,6 +23,7 @@ from JiT.decoder.gan import (
 from JiT.decoder.losses import (
     build_decoder_loss_breakdown,
     hinge_discriminator_loss,
+    r1_gradient_penalty,
     vanilla_generator_loss,
 )
 
@@ -237,20 +238,33 @@ def _discriminator_step(
     real_disc_images = _apply_discriminator_augment(real_disc_images, gan_state)
     fake_disc_images = _apply_discriminator_augment(fake_disc_images, gan_state)
 
+    r1_weight = gan_state.loss_config.r1_weight
+    if r1_weight > 0.0:
+        real_disc_images = real_disc_images.float().requires_grad_(True)
+
     with _autocast_context(device):
         fake_logits, real_logits = discriminator(fake_disc_images, real_disc_images)
         disc_loss = hinge_discriminator_loss(real_logits, fake_logits)
+
+    r1_penalty_value = 0.0
+    if r1_weight > 0.0:
+        r1_penalty = r1_gradient_penalty(real_logits.float(), real_disc_images)
+        disc_loss = disc_loss + r1_weight * 0.5 * r1_penalty
+        r1_penalty_value = float(r1_penalty.item())
 
     disc_loss_value = float(disc_loss.item())
     _raise_if_not_finite(disc_loss_value, "Discriminator loss")
     disc_loss.backward()
     gan_state.discriminator_optimizer.step()
 
-    return {
+    metrics = {
         "disc_loss": disc_loss_value,
         "disc_real_logit": float(real_logits.detach().mean().item()),
         "disc_fake_logit": float(fake_logits.detach().mean().item()),
     }
+    if r1_weight > 0.0:
+        metrics["r1_penalty"] = r1_penalty_value
+    return metrics
 
 
 def train_epoch(
@@ -303,13 +317,15 @@ def train_epoch(
 
         disc_lr = None
         if gan_state is not None:
+            disc_epoch_offset = gan_state.disc_lr_epoch_offset
+            disc_epoch_progress = max(0.0, epoch_progress - disc_epoch_offset)
             disc_lr = _adjust_optimizer_learning_rate(
                 gan_state.discriminator_optimizer,
-                epoch_progress,
+                disc_epoch_progress,
                 lr=gan_state.disc_lr,
                 min_lr=gan_state.disc_min_lr,
                 warmup_epochs=gan_state.disc_warmup_epochs,
-                total_epochs=gan_state.disc_total_epochs,
+                total_epochs=max(1, gan_state.disc_total_epochs - disc_epoch_offset),
                 lr_schedule=gan_state.disc_lr_schedule,
             )
 
@@ -426,7 +442,7 @@ def train_epoch(
                 metric_logger.update(generator_adv_loss=adv_value, disc_weight=disc_weight_value)
                 step_metrics["generator_adv_loss"] = adv_value
                 step_metrics["disc_weight"] = disc_weight_value
-        for key in ("disc_loss", "disc_real_logit", "disc_fake_logit"):
+        for key in ("disc_loss", "disc_real_logit", "disc_fake_logit", "r1_penalty"):
             if key in step_metrics:
                 metric_logger.update(**{key: step_metrics[key]})
 

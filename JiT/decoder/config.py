@@ -118,6 +118,7 @@ class DecoderLossConfig:
     lpips_start: int = 0
     max_d_weight: float = 4.0
     disc_updates: int = 1
+    r1_weight: float = 0.0
 
     def perceptual_enabled(self, epoch: int) -> bool:
         return epoch >= self.lpips_start
@@ -291,6 +292,7 @@ def _build_decoder_loss_config(
         lpips_start=int(data.get("lpips_start", defaults.lpips_start)),
         max_d_weight=float(data.get("max_d_weight", defaults.max_d_weight)),
         disc_updates=int(data.get("disc_updates", defaults.disc_updates)),
+        r1_weight=float(data.get("r1_weight", defaults.r1_weight)),
     )
 
 

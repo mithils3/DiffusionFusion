@@ -23,6 +23,19 @@ def hinge_discriminator_loss(real_logits: torch.Tensor, fake_logits: torch.Tenso
     return real_loss + fake_loss
 
 
+def r1_gradient_penalty(
+    real_logits: torch.Tensor,
+    real_images: torch.Tensor,
+) -> torch.Tensor:
+    """R1 gradient penalty: penalize squared gradient norm on real images."""
+    (grad_real,) = torch.autograd.grad(
+        outputs=real_logits.sum(),
+        inputs=real_images,
+        create_graph=True,
+    )
+    return grad_real.pow(2).reshape(grad_real.shape[0], -1).sum(1).mean()
+
+
 def vanilla_generator_loss(fake_logits: torch.Tensor) -> torch.Tensor:
     return -fake_logits.mean()
 
