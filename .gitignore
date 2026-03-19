@@ -1,1 +1,3 @@
 sbatch/DiffusionFusion.code-workspace
+__pycache__/
+*.py[cod]
