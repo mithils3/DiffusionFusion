@@ -4,16 +4,18 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
 import torch
 import torch.distributed as dist
-import torch_fidelity
 from datasets import load_dataset
 from torch.utils.data import DataLoader
-from torchvision.transforms import functional as TF
 from tqdm import tqdm
+from PIL import Image
 
 from diffusers.models import AutoencoderKL
 
@@ -22,8 +24,6 @@ from JiT.util.image_transforms import build_center_crop_normalize_transform
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
-
-_DEFAULT_FID_STATS_PATH = Path("/work/nvme/betw/msalunkhe/data/jit_in256_stats.npz")
 
 
 def collate_fn(batch):
@@ -61,7 +61,10 @@ def cleanup_distributed(is_distributed: bool) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Simple SDXL-VAE FID/IS eval following JiT's ImageNet loading setup."
+        description=(
+            "Reconstruct ImageNet images with SDXL-VAE, save ADM-compatible sample batches "
+            "as a .npz, and optionally run guided-diffusion evaluator.py."
+        )
     )
     parser.add_argument("--data-path", type=str, required=True)
     parser.add_argument("--output-dir", type=str, required=True)
@@ -82,10 +85,41 @@ def parse_args() -> argparse.Namespace:
         default="stabilityai/sdxl-vae",
     )
     parser.add_argument(
-        "--fid-statistics-file",
+        "--reference-npz",
         type=str,
-        default=str(_DEFAULT_FID_STATS_PATH),
-        help="Defaults to the same .npz path used by JiT decoder training.",
+        default=None,
+        help=(
+            "Optional ADM reference batch .npz such as "
+            "VIRTUAL_imagenet256_labeled.npz. Required only if you also pass "
+            "--guided-diffusion-evaluator."
+        ),
+    )
+    parser.add_argument(
+        "--guided-diffusion-evaluator",
+        type=str,
+        default=None,
+        help=(
+            "Optional path to guided-diffusion/evaluations/evaluator.py. If provided, "
+            "the script will run ADM-style metrics on the saved samples .npz."
+        ),
+    )
+    parser.add_argument(
+        "--samples-npz-name",
+        type=str,
+        default="reconstructions_adm.npz",
+        help="Filename for the ADM-compatible samples .npz inside --output-dir.",
+    )
+    parser.add_argument(
+        "--save-pngs",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Optionally also save per-image PNG reconstructions alongside the ADM .npz.",
+    )
+    parser.add_argument(
+        "--keep-temp-chunks",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Keep temporary per-rank .npz chunks used to assemble the final ADM batch.",
     )
     parser.add_argument(
         "--device",
@@ -94,39 +128,94 @@ def parse_args() -> argparse.Namespace:
         help='Single-process device. Ignored under torchrun, where LOCAL_RANK selects the GPU.',
     )
     parser.add_argument("--local-files-only", action="store_true")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.guided_diffusion_evaluator and not args.reference_npz:
+        parser.error("--reference-npz is required when --guided-diffusion-evaluator is set.")
+    return args
 
 
-def resolve_fid_stats_path(args: argparse.Namespace) -> Path:
-    return Path(args.fid_statistics_file).expanduser().resolve()
+def resolve_optional_path(value: str | None) -> Path | None:
+    if value is None:
+        return None
+    return Path(value).expanduser().resolve()
 
 
-def validate_fid_stats_file(path: Path) -> None:
-    try:
-        stats = np.load(path)
-    except Exception as exc:
-        raise ValueError(f"Failed to load FID statistics file {path}: {exc}") from exc
-
-    keys = set(stats.files)
-    if not {"mu", "sigma"}.issubset(keys):
-        raise ValueError(
-            f"FID statistics file {path} must contain 'mu' and 'sigma' arrays, found keys: {sorted(keys)}"
-        )
-
-    mu = stats["mu"]
-    sigma = stats["sigma"]
-    if mu.shape != (2048,) or sigma.shape != (2048, 2048):
-        raise ValueError(
-            "FID statistics shape mismatch. "
-            f"Expected mu=(2048,) and sigma=(2048, 2048) for torch-fidelity's "
-            f'inception-v3-compat extractor, but got mu={mu.shape} and sigma={sigma.shape} from "{path}".'
+def save_uint8_pngs(images: np.ndarray, sample_positions: np.ndarray, output_dir: Path) -> None:
+    for image_array, sample_position in zip(images, sample_positions.tolist(), strict=True):
+        Image.fromarray(image_array).save(
+            output_dir / f"{sample_position:06d}.png",
+            format="PNG",
+            compress_level=0,
         )
 
 
-def save_reconstructions(images: torch.Tensor, sample_ids: torch.Tensor, output_dir: Path) -> None:
-    for image_tensor, sample_id in zip(images, sample_ids.tolist(), strict=True):
-        image = TF.to_pil_image(image_tensor.clamp(0.0, 1.0))
-        image.save(output_dir / f"{sample_id:08d}.png", format="PNG", compress_level=0)
+def save_chunk(
+    *,
+    chunk_dir: Path,
+    rank: int,
+    chunk_index: int,
+    sample_positions: np.ndarray,
+    samples: np.ndarray,
+) -> Path:
+    chunk_path = chunk_dir / f"rank{rank:02d}_chunk{chunk_index:06d}.npz"
+    np.savez(chunk_path, positions=sample_positions, samples=samples)
+    return chunk_path
+
+
+def build_adm_npz_from_chunks(
+    *,
+    chunk_dir: Path,
+    output_path: Path,
+    num_images: int,
+) -> tuple[Path, tuple[int, int, int, int]]:
+    chunk_paths = sorted(chunk_dir.glob("rank*_chunk*.npz"))
+    if not chunk_paths:
+        raise FileNotFoundError(f"No chunk files found in {chunk_dir}.")
+
+    samples: np.ndarray | None = None
+    for chunk_path in tqdm(chunk_paths, desc="Merging ADM chunks"):
+        with np.load(chunk_path) as payload:
+            sample_positions = payload["positions"]
+            chunk_samples = payload["samples"]
+        if samples is None:
+            height, width = chunk_samples.shape[1:3]
+            samples = np.empty((num_images, height, width, 3), dtype=np.uint8)
+        samples[sample_positions] = chunk_samples
+
+    assert samples is not None
+    np.savez(output_path, arr_0=samples)
+    return output_path, samples.shape
+
+
+def run_guided_diffusion_evaluator(
+    *,
+    evaluator_path: Path,
+    reference_npz: Path,
+    samples_npz: Path,
+    output_dir: Path,
+) -> dict[str, object]:
+    command = [
+        sys.executable,
+        str(evaluator_path),
+        str(reference_npz),
+        str(samples_npz),
+    ]
+    completed = subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    stdout_path = output_dir / "guided_diffusion_eval_stdout.txt"
+    stderr_path = output_dir / "guided_diffusion_eval_stderr.txt"
+    stdout_path.write_text(completed.stdout, encoding="utf-8")
+    stderr_path.write_text(completed.stderr, encoding="utf-8")
+    return {
+        "command": command,
+        "returncode": completed.returncode,
+        "stdout_path": str(stdout_path),
+        "stderr_path": str(stderr_path),
+    }
 
 
 @torch.inference_mode()
@@ -138,16 +227,27 @@ def main() -> None:
         cleanup_distributed(is_distributed)
         raise ValueError("Image size must be divisible by 8.")
 
-    fid_statistics_file = resolve_fid_stats_path(args)
-    if not fid_statistics_file.is_file():
+    reference_npz = resolve_optional_path(args.reference_npz)
+    if reference_npz is not None and not reference_npz.is_file():
         cleanup_distributed(is_distributed)
-        raise FileNotFoundError(f"FID statistics file not found: {fid_statistics_file}")
+        raise FileNotFoundError(f"Reference ADM .npz file not found: {reference_npz}")
+
+    guided_diffusion_evaluator = resolve_optional_path(args.guided_diffusion_evaluator)
+    if guided_diffusion_evaluator is not None and not guided_diffusion_evaluator.is_file():
+        cleanup_distributed(is_distributed)
+        raise FileNotFoundError(
+            f"guided-diffusion evaluator.py not found: {guided_diffusion_evaluator}"
+        )
 
     output_dir = Path(args.output_dir).expanduser().resolve()
     recon_dir = output_dir / "reconstructions"
+    chunk_dir = output_dir / "adm_chunks"
+    samples_npz_path = output_dir / args.samples_npz_name
     if rank == 0:
         output_dir.mkdir(parents=True, exist_ok=True)
-        recon_dir.mkdir(parents=True, exist_ok=True)
+        chunk_dir.mkdir(parents=True, exist_ok=True)
+        if args.save_pngs:
+            recon_dir.mkdir(parents=True, exist_ok=True)
     barrier_if_distributed(is_distributed)
 
     transform = build_center_crop_normalize_transform(
@@ -167,6 +267,7 @@ def main() -> None:
         )
     selected_indices = list(range(args.start_index, end_index))
     local_indices = selected_indices[rank::world_size]
+    local_positions = list(range(rank, len(selected_indices), world_size))
     dataset = dataset.select(local_indices)
     dataset = dataset.with_format("torch")
     dataset = dataset.with_transform(
@@ -194,51 +295,84 @@ def main() -> None:
     vae.enable_slicing()
 
     local_offset = 0
+    chunk_index = 0
     progress = tqdm(loader, total=len(loader), desc=f"Rank {rank}", disable=rank != 0)
     for batch in progress:
         images = batch["image"].to(device)
         latents = vae.encode(images).latent_dist.sample().mul_(vae.config.scaling_factor)
         reconstructions = vae.decode(latents / vae.config.scaling_factor).sample
-        reconstructions = reconstructions.clamp(-1.0, 1.0).add(1.0).div(2.0).cpu()
+        reconstructions = (
+            (127.5 * reconstructions + 128.0)
+            .clamp(0.0, 255.0)
+            .permute(0, 2, 3, 1)
+            .to("cpu", dtype=torch.uint8)
+            .numpy()
+        )
 
         batch_size = reconstructions.shape[0]
-        sample_ids = torch.tensor(local_indices[local_offset:local_offset + batch_size], dtype=torch.long)
-        save_reconstructions(reconstructions, sample_ids, recon_dir)
+        sample_positions = np.asarray(
+            local_positions[local_offset:local_offset + batch_size],
+            dtype=np.int64,
+        )
+        save_chunk(
+            chunk_dir=chunk_dir,
+            rank=rank,
+            chunk_index=chunk_index,
+            sample_positions=sample_positions,
+            samples=reconstructions,
+        )
+        if args.save_pngs:
+            save_uint8_pngs(reconstructions, sample_positions, recon_dir)
         local_offset += batch_size
+        chunk_index += 1
 
     barrier_if_distributed(is_distributed)
 
     if rank == 0:
-        metrics = torch_fidelity.calculate_metrics(
-            input1=str(recon_dir),
-            input2=None,
-            fid_statistics_file=str(fid_statistics_file),
-            cuda=device.type == "cuda",
-            isc=True,
-            fid=True,
-            kid=False,
-            prc=False,
-            verbose=True,
+        samples_npz_path, sample_shape = build_adm_npz_from_chunks(
+            chunk_dir=chunk_dir,
+            output_path=samples_npz_path,
+            num_images=args.num_images,
         )
         summary = {
-            "fid": float(metrics["frechet_inception_distance"]),
-            "inception_score_mean": float(metrics["inception_score_mean"]),
-            "inception_score_std": float(metrics["inception_score_std"]),
             "num_images": args.num_images,
             "start_index": args.start_index,
             "split": args.split,
             "image_size": args.image_size,
             "data_path": args.data_path,
             "vae_pretrained_path": args.vae_pretrained_path,
-            "fid_statistics_file": str(fid_statistics_file),
-            "reconstructions_dir": str(recon_dir),
+            "samples_npz_path": str(samples_npz_path),
+            "samples_npz_shape": list(sample_shape),
+            "reconstructions_dir": str(recon_dir) if args.save_pngs else None,
+            "temp_chunk_dir": str(chunk_dir),
             "world_size": world_size,
+            "reference_npz": str(reference_npz) if reference_npz is not None else None,
+            "guided_diffusion_evaluator": (
+                str(guided_diffusion_evaluator)
+                if guided_diffusion_evaluator is not None
+                else None
+            ),
         }
-        if str(fid_statistics_file) == str(_DEFAULT_FID_STATS_PATH) and args.split != "train":
-            summary["note"] = (
-                "Using validation images with the decoder's default FID stats file. "
-                "That default stats file is likely train-reference stats because JiT/prepare_ref.py defaults to train."
+        if guided_diffusion_evaluator is not None and reference_npz is not None:
+            adm_eval = run_guided_diffusion_evaluator(
+                evaluator_path=guided_diffusion_evaluator,
+                reference_npz=reference_npz,
+                samples_npz=samples_npz_path,
+                output_dir=output_dir,
             )
+            summary["guided_diffusion_eval"] = adm_eval
+        elif reference_npz is not None:
+            summary["guided_diffusion_eval_command"] = [
+                sys.executable,
+                "path/to/guided-diffusion/evaluations/evaluator.py",
+                str(reference_npz),
+                str(samples_npz_path),
+            ]
+        if not args.keep_temp_chunks:
+            shutil.rmtree(chunk_dir)
+            summary["temp_chunk_dir_removed"] = True
+        else:
+            summary["temp_chunk_dir_removed"] = False
         print(json.dumps(summary, indent=2))
         (output_dir / "metrics.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
 

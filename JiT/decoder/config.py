@@ -80,7 +80,7 @@ class DiscriminatorArchConfig:
 
 @dataclass(frozen=True)
 class DiscriminatorAugmentConfig:
-    prob: float = 1.0
+    prob: float = 0.5
     cutout: float = 0.0
     brightness: float = 0.2
     contrast: float = 0.2
@@ -119,12 +119,19 @@ class DecoderLossConfig:
     max_d_weight: float = 4.0
     disc_updates: int = 1
     r1_weight: float = 0.0
+    r1_interval: int = 16
+    r1_max_penalty: float | None = 1.0
 
     def perceptual_enabled(self, epoch: int) -> bool:
         return epoch >= self.lpips_start
 
     def discriminator_updates_enabled(self, epoch: int) -> bool:
         return epoch >= self.disc_upd_start
+
+    def r1_enabled_for_step(self, discriminator_step: int) -> bool:
+        if self.r1_weight <= 0.0 or self.r1_interval <= 0:
+            return False
+        return discriminator_step % self.r1_interval == 0
 
     def adversarial_enabled(self, epoch: int) -> bool:
         return epoch >= self.disc_start
@@ -278,6 +285,7 @@ def _build_decoder_loss_config(
 ) -> DecoderLossConfig:
     if not data:
         return defaults
+    r1_max_penalty = data.get("r1_max_penalty", defaults.r1_max_penalty)
     return DecoderLossConfig(
         disc_loss=str(data.get("disc_loss", defaults.disc_loss)),
         gen_loss=str(data.get("gen_loss", defaults.gen_loss)),
@@ -293,6 +301,8 @@ def _build_decoder_loss_config(
         max_d_weight=float(data.get("max_d_weight", defaults.max_d_weight)),
         disc_updates=int(data.get("disc_updates", defaults.disc_updates)),
         r1_weight=float(data.get("r1_weight", defaults.r1_weight)),
+        r1_interval=int(data.get("r1_interval", defaults.r1_interval)),
+        r1_max_penalty=None if r1_max_penalty is None else float(r1_max_penalty),
     )
 
 
