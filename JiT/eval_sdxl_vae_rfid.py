@@ -17,7 +17,7 @@ from diffusers.models import AutoencoderKL
 from JiT.util.image_transforms import build_center_crop_normalize_transform
 
 
-_DEFAULT_FID_STATS_PATH = Path("/work/nvme/betw/msalunkhe/data/jit_in256_stats.npz")
+_DEFAULT_FID_STATS_PATH = Path("/work/nvme/betw/msalunkhe/data/VIRTUAL_imagenet256_labeled.npz")
 
 
 def collate_fn(batch):
