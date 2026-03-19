@@ -1,4 +1,5 @@
 import argparse
+import copy
 import datetime
 import os
 import time
@@ -25,6 +26,29 @@ torch.backends.cudnn.allow_tf32 = True
 torch.backends.cudnn.benchmark = True
 
 _DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "decoder" / "default_config.yaml"
+
+
+@torch.no_grad()
+def update_ema_model(
+    ema_model: torch.nn.Module,
+    model: torch.nn.Module,
+    decay: float,
+) -> None:
+    for ema_param, model_param in zip(ema_model.parameters(), model.parameters(), strict=True):
+        ema_param.mul_(decay).add_(model_param.detach(), alpha=1.0 - decay)
+    for ema_buffer, model_buffer in zip(ema_model.buffers(), model.buffers(), strict=True):
+        ema_buffer.copy_(model_buffer.detach())
+
+
+def build_decoder_ema_model(
+    model_without_ddp: torch.nn.Module,
+    device: torch.device,
+) -> torch.nn.Module:
+    ema_model = copy.deepcopy(model_without_ddp).to(device)
+    ema_model.eval()
+    for parameter in ema_model.parameters():
+        parameter.requires_grad_(False)
+    return ema_model
 
 
 def get_args_parser() -> argparse.ArgumentParser:
@@ -104,6 +128,7 @@ def get_args_parser() -> argparse.ArgumentParser:
         metavar=("BETA1", "BETA2"),
     )
     parser.add_argument("--weight_decay", default=optimizer_defaults.weight_decay, type=float)
+    parser.add_argument("--ema_decay", default=training_defaults.ema_decay, type=float)
     parser.add_argument("--min_lr", default=scheduler_defaults.final_lr, type=float)
     parser.add_argument("--warmup_epochs", default=scheduler_defaults.warmup_epochs, type=int)
     parser.add_argument("--lr_schedule", default=scheduler_defaults.type, type=str)
@@ -325,6 +350,7 @@ def save_decoder_checkpoint(
     optimizer: torch.optim.Optimizer,
     epoch: int,
     epoch_name: str = "last",
+    ema_model: torch.nn.Module | None = None,
 ) -> None:
     if not args.output_dir:
         return
@@ -336,6 +362,8 @@ def save_decoder_checkpoint(
         "epoch": epoch,
         "args": {key: value for key, value in vars(args).items() if key != "decoder_plan"},
     }
+    if ema_model is not None:
+        payload["model_ema"] = ema_model.state_dict()
     misc.save_on_master(payload, checkpoint_path)
 
 
@@ -343,6 +371,7 @@ def maybe_resume_checkpoint(
     args: argparse.Namespace,
     model_without_ddp: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
+    ema_model: torch.nn.Module | None = None,
 ) -> None:
     checkpoint_path = os.path.join(args.resume, "checkpoint-last.pth") if args.resume else None
     if not checkpoint_path or not os.path.exists(checkpoint_path):
@@ -350,6 +379,9 @@ def maybe_resume_checkpoint(
 
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     model_without_ddp.load_state_dict(checkpoint["model"])
+    if ema_model is not None:
+        ema_state = checkpoint.get("model_ema", checkpoint["model"])
+        ema_model.load_state_dict(ema_state)
 
     if "optimizer" in checkpoint and "epoch" in checkpoint:
         optimizer.load_state_dict(checkpoint["optimizer"])
@@ -531,6 +563,10 @@ def main(args: argparse.Namespace) -> None:
             static_graph=args.ddp_static_graph,
         )
     model_without_ddp = model.module if hasattr(model, "module") else model
+    ema_model = None
+    if args.ema_decay > 0.0:
+        ema_model = build_decoder_ema_model(model_without_ddp, device)
+        print(f"Decoder EMA enabled with decay={args.ema_decay:.6f}")
 
     param_groups = misc.add_weight_decay(model_without_ddp, args.weight_decay)
     optimizer = torch.optim.Adam(
@@ -540,14 +576,14 @@ def main(args: argparse.Namespace) -> None:
     )
     print(optimizer)
 
-    maybe_resume_checkpoint(args, model_without_ddp, optimizer)
+    maybe_resume_checkpoint(args, model_without_ddp, optimizer, ema_model)
 
     try:
         if args.evaluate_only:
             print("Evaluating decoder checkpoint at epoch", args.start_epoch)
             with torch.no_grad():
                 evaluate(
-                    model_without_ddp,
+                    ema_model if ema_model is not None else model_without_ddp,
                     args,
                     args.start_epoch,
                     data_loader=data_loader_eval,
@@ -574,6 +610,11 @@ def main(args: argparse.Namespace) -> None:
                 wandb_run=wandb_run,
                 data_loader=data_loader_train,
                 device=device,
+                post_step_callback=(
+                    lambda: update_ema_model(ema_model, model_without_ddp, args.ema_decay)
+                    if ema_model is not None
+                    else None
+                ),
             )
 
             did_save_checkpoint = False
@@ -584,6 +625,7 @@ def main(args: argparse.Namespace) -> None:
                     optimizer=optimizer,
                     epoch=epoch,
                     epoch_name="last",
+                    ema_model=ema_model,
                 )
                 did_save_checkpoint = True
 
@@ -594,6 +636,7 @@ def main(args: argparse.Namespace) -> None:
                     optimizer=optimizer,
                     epoch=epoch,
                     epoch_name=str(epoch),
+                    ema_model=ema_model,
                 )
                 did_save_checkpoint = True
 
@@ -605,7 +648,7 @@ def main(args: argparse.Namespace) -> None:
                     torch.cuda.empty_cache()
                 with torch.no_grad():
                     evaluate(
-                        model_without_ddp,
+                        ema_model if ema_model is not None else model_without_ddp,
                         args,
                         epoch,
                         data_loader=data_loader_eval,

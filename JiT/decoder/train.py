@@ -1,9 +1,10 @@
-from contextlib import nullcontext
-from itertools import islice
 import math
 import os
 import shutil
 import time
+from collections.abc import Callable
+from contextlib import nullcontext
+from itertools import islice
 
 import torch
 from PIL import Image
@@ -219,6 +220,7 @@ def train_epoch(
     data_loader,
     device,
     gan_state: DecoderGanTrainingState | None = None,
+    post_step_callback: Callable[[], None] | None = None,
 ):
     model.train(True)
     model_without_ddp = _unwrap_model(model)
@@ -357,6 +359,8 @@ def train_epoch(
         _raise_if_not_finite(total_loss_value, "Decoder loss")
         total_loss.backward()
         optimizer.step()
+        if post_step_callback is not None:
+            post_step_callback()
 
         metric_logger.update(
             loss=total_loss_value,

@@ -1,16 +1,17 @@
+import os
+import argparse
+
+import numpy as np
+import timm
 import torch
 import torch.distributed as dist
-import os
-import json
-import timm
-from datasets import load_dataset
-from torch.utils.data.distributed import DistributedSampler
-from torch.utils.data import DataLoader
 from datasets import Array3D, Dataset, Features, Value, concatenate_datasets
+from datasets import load_dataset
+from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
-import argparse
-import numpy as np
 
+from JiT.util.feature_normalization import normalize_dino_feature_map_tokens
 from JiT.util.image_transforms import build_center_crop_normalize_transform
 
 
@@ -44,8 +45,8 @@ def save_feature_shard(output_dir, shard_name, features, labels, sample_ids, hf_
 
 def main(args):
     """
-    Extracts DINO features and normalizes them to zero mean, unit variance
-    (channel-wise) to match the scale of VAE latents.
+    Extract DINO features and normalize each spatial token independently across
+    channels, matching the RAE latent preprocessing recipe.
     """
     assert torch.cuda.is_available(), "Requires at least one GPU."
 
@@ -119,49 +120,6 @@ def main(args):
         (args.hidden_size, patches, patches), args.max_shard_size_mb)
     print(f"Rank {rank}: writing approximately {samples_per_shard} samples per shard.")
 
-    # Pass 1: compute global channel-wise stats without retaining features in RAM.
-    channel_sum = np.zeros(args.hidden_size, dtype=np.float64)
-    channel_sum_sq = np.zeros(args.hidden_size, dtype=np.float64)
-    pixel_count = 0
-
-    for batch in tqdm(loader, total=len(loader), desc=f"Rank {rank} [stats]"):
-        x = batch["image"].to(device)
-
-        with torch.no_grad():
-            output = model(x)[-1]  # last feature map (B, C, H, W)
-
-        output = output.detach().cpu().float().numpy()
-
-        # Running channel-wise sums: reduce over (B, H, W), keep C
-        channel_sum += output.sum(axis=(0, 2, 3))
-        channel_sum_sq += (output ** 2).sum(axis=(0, 2, 3))
-        pixel_count += output.shape[0] * output.shape[2] * output.shape[3]
-
-    # All-reduce channel stats across ranks to get global mean/std
-    sum_t = torch.tensor(channel_sum, dtype=torch.float64, device=device)
-    sum_sq_t = torch.tensor(channel_sum_sq, dtype=torch.float64, device=device)
-    count_t = torch.tensor([pixel_count], dtype=torch.float64, device=device)
-    dist.all_reduce(sum_t)
-    dist.all_reduce(sum_sq_t)
-    dist.all_reduce(count_t)
-
-    global_mean = (sum_t / count_t).cpu().numpy()            # (C,)
-    global_std = np.sqrt(
-        (sum_sq_t / count_t).cpu().numpy() - global_mean ** 2
-    )                                                         # (C,)
-    mean = global_mean.astype(np.float32).reshape(-1, 1, 1)  # (C, 1, 1)
-    std = global_std.astype(np.float32).reshape(-1, 1, 1)    # (C, 1, 1)
-
-    # Save normalization stats (needed to un-normalize generated DINO features)
-    if rank == 0:
-        stats_path = os.path.join(output_dir, "normalization_stats.json")
-        with open(stats_path, "w") as f:
-            json.dump({"mean": global_mean.tolist(),
-                       "std": global_std.tolist()}, f)
-        print(f"Saved normalization stats to: {stats_path}")
-
-    # Pass 2: recompute features, normalize on the fly, and write small HF shards.
-    dist.barrier()
     feature_buf = []
     label_buf = []
     sample_id_buf = []
@@ -175,9 +133,9 @@ def main(args):
 
         with torch.no_grad():
             output = model(x)[-1]  # last feature map (B, C, H, W)
+            output = normalize_dino_feature_map_tokens(output)
 
-        output = output.detach().cpu().float().numpy()
-        output = ((output - mean) / std).astype(np.float16)
+        output = output.detach().cpu().numpy().astype(np.float16, copy=False)
 
         for i in range(output.shape[0]):
             sample_id = rank_sample_offset + local_sample_idx
@@ -215,7 +173,7 @@ def main(args):
 
     dist.barrier()
     if rank == 0:
-        print(f"Saved normalized HF dataset to: {output_dir}")
+        print(f"Saved per-token normalized HF dataset to: {output_dir}")
 
     dist.destroy_process_group()
 
