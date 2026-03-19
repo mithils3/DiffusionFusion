@@ -24,6 +24,7 @@ IMAGE_DATA_PATH="ILSVRC/imagenet-1k"
 
 FEATURE_ROOT="/work/hdd/bgnp/msalunkhe/data/imagenet"
 OUTPUT_DIR="/work/nvme/bgnp/msalunkhe/outputs/jit_decoder_small_gan_lower_noise_r1_norm"
+FID_STATS_PATH="/work/nvme/betw/msalunkhe/data/jit_in256_stats.npz"
 mkdir -p "${OUTPUT_DIR}"
 
 OMP_NUM_THREADS=16 torchrun \
@@ -37,6 +38,7 @@ OMP_NUM_THREADS=16 torchrun \
   --latent_dir_name imagenet256_latents \
   --dino_dir_name imagenet256_dinov3_features \
   --output_dir "${OUTPUT_DIR}" \
+  --decoder_eval_fid_stats "${FID_STATS_PATH}" \
   --batch_size 96 \
   --epochs 12 \
   --eval_freq 2 \

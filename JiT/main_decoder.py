@@ -26,6 +26,7 @@ torch.backends.cudnn.allow_tf32 = True
 torch.backends.cudnn.benchmark = True
 
 _DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "decoder" / "default_config.yaml"
+_DEFAULT_FID_STATS_PATH = "/work/nvme/betw/msalunkhe/data/jit_in256_stats.npz"
 
 
 @torch.no_grad()
@@ -259,7 +260,7 @@ def get_args_parser() -> argparse.ArgumentParser:
     parser.add_argument("--decoder_eval_reference_dir", default=None, type=str)
     parser.add_argument(
         "--decoder_eval_fid_stats",
-        default=None,
+        default=_DEFAULT_FID_STATS_PATH,
         type=str,
         help="Path to a torch-fidelity FID statistics .npz file used for decoder eval.",
     )
