@@ -38,6 +38,6 @@ OMP_NUM_THREADS=16 torchrun \
   --dino_dir_name imagenet256_dinov3_features \
   --output_dir "${OUTPUT_DIR}" \
   --batch_size 96 \
-  --epochs 16 \
+  --epochs 12 \
   --eval_freq 2 \
   --num_images 10000
