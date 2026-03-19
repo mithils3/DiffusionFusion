@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 import torch
+import torch.distributed as dist
 import torch_fidelity
 from datasets import load_dataset
 from torch.utils.data import DataLoader
@@ -17,12 +19,43 @@ from diffusers.models import AutoencoderKL
 from JiT.util.image_transforms import build_center_crop_normalize_transform
 
 
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+
 _DEFAULT_FID_STATS_PATH = Path("/work/nvme/betw/msalunkhe/data/VIRTUAL_imagenet256_labeled.npz")
 
 
 def collate_fn(batch):
     images = torch.stack([sample["image"] for sample in batch], dim=0)
     return {"image": images}
+
+
+def init_distributed(device_arg: str) -> tuple[torch.device, int, int, bool]:
+    if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
+        if not torch.cuda.is_available():
+            raise RuntimeError("Distributed evaluation requires CUDA.")
+
+        rank = int(os.environ["RANK"])
+        world_size = int(os.environ["WORLD_SIZE"])
+        local_rank = int(os.environ.get("LOCAL_RANK", rank % torch.cuda.device_count()))
+        torch.cuda.set_device(local_rank)
+        dist.init_process_group("nccl")
+        return torch.device("cuda", local_rank), rank, world_size, True
+
+    device = torch.device(device_arg)
+    if device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA was requested but no CUDA device is available.")
+    return device, 0, 1, False
+
+
+def barrier_if_distributed(is_distributed: bool) -> None:
+    if is_distributed:
+        dist.barrier()
+
+
+def cleanup_distributed(is_distributed: bool) -> None:
+    if is_distributed and dist.is_initialized():
+        dist.destroy_process_group()
 
 
 def parse_args() -> argparse.Namespace:
@@ -57,6 +90,7 @@ def parse_args() -> argparse.Namespace:
         "--device",
         type=str,
         default="cuda" if torch.cuda.is_available() else "cpu",
+        help='Single-process device. Ignored under torchrun, where LOCAL_RANK selects the GPU.',
     )
     parser.add_argument("--local-files-only", action="store_true")
     return parser.parse_args()
@@ -75,21 +109,23 @@ def save_reconstructions(images: torch.Tensor, sample_ids: torch.Tensor, output_
 @torch.inference_mode()
 def main() -> None:
     args = parse_args()
-    device = torch.device(args.device)
-    if device.type == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("CUDA was requested but no CUDA device is available.")
+    device, rank, world_size, is_distributed = init_distributed(args.device)
 
     if args.image_size % 8 != 0:
+        cleanup_distributed(is_distributed)
         raise ValueError("Image size must be divisible by 8.")
 
     fid_statistics_file = resolve_fid_stats_path(args)
     if not fid_statistics_file.is_file():
+        cleanup_distributed(is_distributed)
         raise FileNotFoundError(f"FID statistics file not found: {fid_statistics_file}")
 
     output_dir = Path(args.output_dir).expanduser().resolve()
     recon_dir = output_dir / "reconstructions"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    recon_dir.mkdir(parents=True, exist_ok=True)
+    if rank == 0:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        recon_dir.mkdir(parents=True, exist_ok=True)
+    barrier_if_distributed(is_distributed)
 
     transform = build_center_crop_normalize_transform(
         args.image_size,
@@ -99,12 +135,16 @@ def main() -> None:
     dataset = load_dataset(args.data_path, split=args.split)
     end_index = args.start_index + args.num_images
     if args.start_index < 0:
+        cleanup_distributed(is_distributed)
         raise ValueError("--start-index must be non-negative.")
     if end_index > len(dataset):
+        cleanup_distributed(is_distributed)
         raise ValueError(
             f"Requested samples [{args.start_index}, {end_index}) exceed dataset size {len(dataset)}."
         )
-    dataset = dataset.select(range(args.start_index, end_index))
+    selected_indices = list(range(args.start_index, end_index))
+    local_indices = selected_indices[rank::world_size]
+    dataset = dataset.select(local_indices)
     dataset = dataset.with_format("torch")
     dataset = dataset.with_transform(
         lambda examples: {
@@ -130,49 +170,57 @@ def main() -> None:
     vae.eval()
     vae.enable_slicing()
 
-    global_offset = args.start_index
-    for batch in tqdm(loader, total=len(loader), desc="Reconstructing"):
+    local_offset = 0
+    progress = tqdm(loader, total=len(loader), desc=f"Rank {rank}", disable=rank != 0)
+    for batch in progress:
         images = batch["image"].to(device)
         latents = vae.encode(images).latent_dist.sample().mul_(vae.config.scaling_factor)
         reconstructions = vae.decode(latents / vae.config.scaling_factor).sample
         reconstructions = reconstructions.clamp(-1.0, 1.0).add(1.0).div(2.0).cpu()
 
         batch_size = reconstructions.shape[0]
-        sample_ids = torch.arange(global_offset, global_offset + batch_size, dtype=torch.long)
+        sample_ids = torch.tensor(local_indices[local_offset:local_offset + batch_size], dtype=torch.long)
         save_reconstructions(reconstructions, sample_ids, recon_dir)
-        global_offset += batch_size
+        local_offset += batch_size
 
-    metrics = torch_fidelity.calculate_metrics(
-        input1=str(recon_dir),
-        input2=None,
-        fid_statistics_file=str(fid_statistics_file),
-        cuda=device.type == "cuda",
-        isc=True,
-        fid=True,
-        kid=False,
-        prc=False,
-        verbose=True,
-    )
-    summary = {
-        "fid": float(metrics["frechet_inception_distance"]),
-        "inception_score_mean": float(metrics["inception_score_mean"]),
-        "inception_score_std": float(metrics["inception_score_std"]),
-        "num_images": args.num_images,
-        "start_index": args.start_index,
-        "split": args.split,
-        "image_size": args.image_size,
-        "data_path": args.data_path,
-        "vae_pretrained_path": args.vae_pretrained_path,
-        "fid_statistics_file": str(fid_statistics_file),
-        "reconstructions_dir": str(recon_dir),
-    }
-    if str(fid_statistics_file) == str(_DEFAULT_FID_STATS_PATH) and args.split != "train":
-        summary["note"] = (
-            "Using validation images with the decoder's default FID stats file. "
-            "That default stats file is likely train-reference stats because JiT/prepare_ref.py defaults to train."
+    barrier_if_distributed(is_distributed)
+
+    if rank == 0:
+        metrics = torch_fidelity.calculate_metrics(
+            input1=str(recon_dir),
+            input2=None,
+            fid_statistics_file=str(fid_statistics_file),
+            cuda=device.type == "cuda",
+            isc=True,
+            fid=True,
+            kid=False,
+            prc=False,
+            verbose=True,
         )
-    print(json.dumps(summary, indent=2))
-    (output_dir / "metrics.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+        summary = {
+            "fid": float(metrics["frechet_inception_distance"]),
+            "inception_score_mean": float(metrics["inception_score_mean"]),
+            "inception_score_std": float(metrics["inception_score_std"]),
+            "num_images": args.num_images,
+            "start_index": args.start_index,
+            "split": args.split,
+            "image_size": args.image_size,
+            "data_path": args.data_path,
+            "vae_pretrained_path": args.vae_pretrained_path,
+            "fid_statistics_file": str(fid_statistics_file),
+            "reconstructions_dir": str(recon_dir),
+            "world_size": world_size,
+        }
+        if str(fid_statistics_file) == str(_DEFAULT_FID_STATS_PATH) and args.split != "train":
+            summary["note"] = (
+                "Using validation images with the decoder's default FID stats file. "
+                "That default stats file is likely train-reference stats because JiT/prepare_ref.py defaults to train."
+            )
+        print(json.dumps(summary, indent=2))
+        (output_dir / "metrics.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+
+    barrier_if_distributed(is_distributed)
+    cleanup_distributed(is_distributed)
 
 
 if __name__ == "__main__":
