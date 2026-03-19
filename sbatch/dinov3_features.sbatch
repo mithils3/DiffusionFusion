@@ -30,3 +30,10 @@ feature_extraction/dinov3.py \
 --image-size 256 \
 --num-workers 4 \
 --hf-dataset-name imagenet256_dinov3_features 
+torchrun --nproc_per_node=auto --nnodes=1 --node_rank=0 \
+  JiT/eval_sdxl_vae_rfid.py \
+  --data-path ILSVRC/imagenet-1k \
+  --output-dir /work/nvme/bgnp/msalunkhe/outputs/sdxl_vae_eval \
+  --num-images 10000 \
+  --batch-size 128 \
+  --num-workers 4

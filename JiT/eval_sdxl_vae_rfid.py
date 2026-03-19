@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.distributed as dist
 import torch_fidelity
@@ -22,7 +23,7 @@ from JiT.util.image_transforms import build_center_crop_normalize_transform
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
-_DEFAULT_FID_STATS_PATH = Path("/work/nvme/betw/msalunkhe/data/VIRTUAL_imagenet256_labeled.npz")
+_DEFAULT_FID_STATS_PATH = Path("/work/nvme/betw/msalunkhe/data/jit_in256_stats.npz")
 
 
 def collate_fn(batch):
@@ -98,6 +99,28 @@ def parse_args() -> argparse.Namespace:
 
 def resolve_fid_stats_path(args: argparse.Namespace) -> Path:
     return Path(args.fid_statistics_file).expanduser().resolve()
+
+
+def validate_fid_stats_file(path: Path) -> None:
+    try:
+        stats = np.load(path)
+    except Exception as exc:
+        raise ValueError(f"Failed to load FID statistics file {path}: {exc}") from exc
+
+    keys = set(stats.files)
+    if not {"mu", "sigma"}.issubset(keys):
+        raise ValueError(
+            f"FID statistics file {path} must contain 'mu' and 'sigma' arrays, found keys: {sorted(keys)}"
+        )
+
+    mu = stats["mu"]
+    sigma = stats["sigma"]
+    if mu.shape != (2048,) or sigma.shape != (2048, 2048):
+        raise ValueError(
+            "FID statistics shape mismatch. "
+            f"Expected mu=(2048,) and sigma=(2048, 2048) for torch-fidelity's "
+            f'inception-v3-compat extractor, but got mu={mu.shape} and sigma={sigma.shape} from "{path}".'
+        )
 
 
 def save_reconstructions(images: torch.Tensor, sample_ids: torch.Tensor, output_dir: Path) -> None:
