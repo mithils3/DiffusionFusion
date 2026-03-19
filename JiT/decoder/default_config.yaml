@@ -54,8 +54,8 @@ gan:
     disc_weight: 1.5
     perceptual_weight: 1.0
     adaptive_weight: true
-    disc_start: 4
-    disc_upd_start: 3
+    disc_start: 6
+    disc_upd_start: 4
     adversarial_warmup_epochs: 2.0
     lpips_start: 0
     max_d_weight: 5.0
