@@ -1,5 +1,5 @@
-import os
 import argparse
+import os
 import shutil
 import uuid
 
@@ -18,8 +18,7 @@ from JiT.util.image_transforms import build_center_crop_normalize_transform
 
 def collate_fn(batch):
     images = torch.stack([b["image"] for b in batch], dim=0)
-    labels = torch.tensor([b.get("label", -1)
-                          for b in batch], dtype=torch.long)
+    labels = torch.tensor([b.get("label", -1) for b in batch], dtype=torch.long)
     return {"image": images, "label": labels}
 
 
@@ -51,16 +50,10 @@ def save_feature_shard(output_dir, shard_name, features, labels, sample_ids, hf_
             shutil.rmtree(tmp_shard_dir, ignore_errors=True)
 
 
-def normalize_model_name(model_name: str) -> str:
-    if model_name.startswith("timm/"):
-        return model_name.split("/", 1)[1]
-    return model_name
-
-
 def resolve_output_dataset_name(explicit_name, image_size, split):
     if explicit_name:
         return explicit_name
-    base_name = f"imagenet{image_size}_dinov3_features"
+    base_name = f"imagenet{image_size}_eva02_small_features"
     if split == "train":
         return base_name
     return f"{base_name}_{split}"
@@ -68,35 +61,32 @@ def resolve_output_dataset_name(explicit_name, image_size, split):
 
 def main(args):
     """
-    Extract DINO features and normalize each spatial token independently across
-    channels, matching the RAE latent preprocessing recipe.
+    Extract EVA-02 small patch-14 features as the final spatial feature map.
     """
     assert torch.cuda.is_available(), "Requires at least one GPU."
     assert args.image_size % args.patch_size == 0, (
         f"Image size {args.image_size} must be divisible by patch size {args.patch_size}."
     )
 
-    # Setup DDP:
     dist.init_process_group("nccl")
-    assert args.global_batch_size % dist.get_world_size(
-    ) == 0, f"Batch size must be divisible by world size."
+    assert args.global_batch_size % dist.get_world_size() == 0, (
+        "Batch size must be divisible by world size."
+    )
     rank = dist.get_rank()
     device = rank % torch.cuda.device_count()
     seed = args.global_seed * dist.get_world_size() + rank
     torch.manual_seed(seed)
     torch.cuda.set_device(device)
-    print(
-        f"Starting rank={rank}, seed={seed}, world_size={dist.get_world_size()}.")
+    print(f"Starting rank={rank}, seed={seed}, world_size={dist.get_world_size()}.")
+
     if rank == 0:
         os.makedirs(args.features_path, exist_ok=True)
     dist.barrier()
 
-    model_name = normalize_model_name(args.model_name)
     model = timm.create_model(
-        model_name,
+        args.model_name,
         pretrained=True,
         features_only=True,
-        img_size=args.image_size,
     ).to(device)
     model = model.eval()
 
@@ -119,7 +109,7 @@ def main(args):
         num_replicas=dist.get_world_size(),
         rank=rank,
         shuffle=False,
-        seed=args.global_seed
+        seed=args.global_seed,
     )
     loader = DataLoader(
         dataset,
@@ -134,7 +124,6 @@ def main(args):
     )
 
     patches = args.image_size // args.patch_size
-
     output_dataset_name = resolve_output_dataset_name(
         args.hf_dataset_name,
         args.image_size,
@@ -150,7 +139,8 @@ def main(args):
         }
     )
     samples_per_shard = compute_samples_per_shard(
-        (args.hidden_size, patches, patches), args.max_shard_size_mb)
+        (args.hidden_size, patches, patches), args.max_shard_size_mb
+    )
     print(f"Rank {rank}: writing approximately {samples_per_shard} samples per shard.")
 
     feature_buf = []
@@ -165,8 +155,9 @@ def main(args):
         y = batch["label"].cpu().numpy()
 
         with torch.no_grad():
-            output = model(x)[-1]  # last feature map (B, C, H, W)
-            output = normalize_dino_feature_map_tokens(output)
+            output = model(x)[-1]
+            if args.normalize_tokens:
+                output = normalize_dino_feature_map_tokens(output)
 
         output = output.detach().cpu().numpy().astype(np.float16, copy=False)
 
@@ -202,11 +193,11 @@ def main(args):
             sample_ids=sample_id_buf,
             hf_features=hf_features,
         )
-    del feature_buf, label_buf, sample_id_buf
 
     dist.barrier()
     if rank == 0:
-        print(f"Saved per-token normalized {args.split} HF dataset to: {output_dir}")
+        normalization_note = "per-token normalized " if args.normalize_tokens else ""
+        print(f"Saved {normalization_note}{args.split} HF dataset to: {output_dir}")
 
     dist.destroy_process_group()
 
@@ -221,6 +212,7 @@ if __name__ == "__main__":
         default="train",
         help='Dataset split to encode. Defaults to "train".',
     )
+    parser.add_argument("--image-size", type=int, default=224)
     parser.add_argument("--global-batch-size", type=int, default=256)
     parser.add_argument("--global-seed", type=int, default=0)
     parser.add_argument("--num-workers", type=int, default=4)
@@ -230,18 +222,20 @@ if __name__ == "__main__":
         default=None,
         help=(
             "Output HF dataset directory name. Defaults to "
-            "`imagenet{image_size}_dinov3_features` for train and "
-            "`imagenet{image_size}_dinov3_features_{split}` for non-train splits."
+            "`imagenet{image_size}_eva02_small_features` for train and "
+            "`imagenet{image_size}_eva02_small_features_{split}` for non-train splits."
         ),
     )
     parser.add_argument(
         "--model-name",
         type=str,
-        default="vit_small_patch14_dinov2.lvd142m",
+        default="eva02_small_patch14_224.mim_in22k",
     )
-    parser.add_argument("--image-size", type=int, default=224)
     parser.add_argument("--hidden-size", type=int, default=384)
     parser.add_argument("--patch-size", type=int, default=14)
     parser.add_argument("--max-shard-size-mb", type=int, default=4096)
+    parser.add_argument("--normalize-tokens", action="store_true")
+    parser.add_argument("--no-normalize-tokens", action="store_false", dest="normalize_tokens")
+    parser.set_defaults(normalize_tokens=True)
     args = parser.parse_args()
     main(args)

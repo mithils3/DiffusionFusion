@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -J DINOv2_features
+#SBATCH -J EVA02_features
 #SBATCH -A bgnp-dtai-gh
 #SBATCH -p ghx4
 #SBATCH --nodes=1
@@ -13,21 +13,21 @@
 
 set -euo pipefail
 
-
 module load python/3.11.9
 module load cuda/12.9.0
 
 source /u/msalunkhe/.venv/bin/activate
 cd /u/msalunkhe/DiffusionFusion/JiT
 git pull
+
 IMAGENET_PATH="ILSVRC/imagenet-1k"
 OUTPUT_DIR="/work/hdd/bgnp/msalunkhe/data/imagenet"
 SPLIT="${SPLIT:-validation}"
-# Avoid thread explosion across DDP ranks + DataLoader workers.
+
 torchrun --nproc_per_node=auto --nnodes=1 --node_rank=0 \
-feature_extraction/dinov3.py \
---data-path ${IMAGENET_PATH}  \
---features-path ${OUTPUT_DIR} \
+feature_extraction/eva02.py \
+--data-path "${IMAGENET_PATH}" \
+--features-path "${OUTPUT_DIR}" \
 --split "${SPLIT}" \
 --image-size 224 \
 --num-workers 4
