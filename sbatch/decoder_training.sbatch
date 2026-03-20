@@ -41,6 +41,6 @@ OMP_NUM_THREADS=16 torchrun \
   --wandb_run_name "jit_decoder_small_gan_lower_noise_r1_image_mean_no_cap" \
   --decoder_eval_fid_stats "${FID_STATS_PATH}" \
   --batch_size 96 \
-  --epochs 12 \
+  --epochs 16 \
   --eval_freq 2 \
   --num_images 10000
