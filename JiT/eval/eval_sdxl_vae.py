@@ -25,7 +25,8 @@ torch.backends.cudnn.allow_tf32 = True
 
 def collate_fn(batch):
     images = torch.stack([sample["image"] for sample in batch], dim=0)
-    image_uint8 = torch.stack([sample["image_uint8"] for sample in batch], dim=0)
+    image_uint8 = torch.stack([sample["image_uint8"]
+                              for sample in batch], dim=0)
     return {
         "image": images,
         "image_uint8": image_uint8,
@@ -39,14 +40,16 @@ def init_distributed(device_arg: str) -> tuple[torch.device, int, int, bool]:
 
         rank = int(os.environ["RANK"])
         world_size = int(os.environ["WORLD_SIZE"])
-        local_rank = int(os.environ.get("LOCAL_RANK", rank % torch.cuda.device_count()))
+        local_rank = int(os.environ.get("LOCAL_RANK", rank %
+                         torch.cuda.device_count()))
         torch.cuda.set_device(local_rank)
         dist.init_process_group("nccl")
         return torch.device("cuda", local_rank), rank, world_size, True
 
     device = torch.device(device_arg)
     if device.type == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("CUDA was requested but no CUDA device is available.")
+        raise RuntimeError(
+            "CUDA was requested but no CUDA device is available.")
     return device, 0, 1, False
 
 
@@ -75,7 +78,8 @@ def parse_args() -> argparse.Namespace:
         default="validation",
         help='Dataset split to reconstruct. Defaults to "validation".',
     )
-    parser.add_argument("--image-size", type=int, choices=[256, 512], default=256)
+    parser.add_argument("--image-size", type=int,
+                        choices=[224, 256, 512], default=256)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--num-images", type=int, default=10000)
@@ -218,7 +222,8 @@ def main() -> None:
     vae.enable_slicing()
 
     local_offset = 0
-    progress = tqdm(loader, total=len(loader), desc=f"Rank {rank}", disable=rank != 0)
+    progress = tqdm(loader, total=len(loader),
+                    desc=f"Rank {rank}", disable=rank != 0)
     for batch in progress:
         images = batch["image"].to(device)
         batch_size = images.shape[0]
@@ -227,11 +232,14 @@ def main() -> None:
             dtype=np.int64,
         )
 
-        reference_images = batch["image_uint8"].permute(0, 2, 3, 1).cpu().numpy()
+        reference_images = batch["image_uint8"].permute(
+            0, 2, 3, 1).cpu().numpy()
         save_uint8_pngs(reference_images, sample_ids, reference_dir)
 
-        latents = vae.encode(images).latent_dist.sample().mul_(vae.config.scaling_factor)
-        reconstructions = vae.decode(latents / vae.config.scaling_factor).sample
+        latents = vae.encode(images).latent_dist.sample().mul_(
+            vae.config.scaling_factor)
+        reconstructions = vae.decode(
+            latents / vae.config.scaling_factor).sample
         reconstructions = (
             (127.5 * reconstructions + 128.0)
             .clamp(0.0, 255.0)
@@ -268,7 +276,8 @@ def main() -> None:
             "world_size": world_size,
         }
         print(json.dumps(summary, indent=2))
-        (output_dir / "metrics.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+        (output_dir / "metrics.json").write_text(json.dumps(summary,
+                                                            indent=2) + "\n", encoding="utf-8")
 
     barrier_if_distributed(is_distributed)
     cleanup_distributed(is_distributed)
