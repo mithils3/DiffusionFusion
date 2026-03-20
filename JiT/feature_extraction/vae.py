@@ -7,11 +7,13 @@ from tqdm import tqdm
 import os
 import logging
 import argparse
+import shutil
 from time import time
 from copy import deepcopy
 from PIL import Image
 from collections import OrderedDict
 import numpy as np
+import uuid
 from torchvision.datasets import ImageFolder
 from torch.utils.data.distributed import DistributedSampler
 from torch.utils.data import DataLoader
@@ -95,7 +97,7 @@ def compute_samples_per_shard(shape, max_shard_size_mb):
 
 def save_feature_shard(output_dir, shard_name, features, labels, sample_ids, hf_features):
     shard_dir = os.path.join(output_dir, shard_name)
-    os.makedirs(shard_dir, exist_ok=True)
+    tmp_shard_dir = f"{shard_dir}.tmp-{uuid.uuid4().hex}"
     shard_ds = Dataset.from_dict(
         {
             "feature": features,
@@ -104,8 +106,15 @@ def save_feature_shard(output_dir, shard_name, features, labels, sample_ids, hf_
         },
         features=hf_features,
     )
-    shard_ds.save_to_disk(shard_dir)
-    del shard_ds
+    try:
+        shard_ds.save_to_disk(tmp_shard_dir)
+        if os.path.exists(shard_dir):
+            shutil.rmtree(shard_dir)
+        os.rename(tmp_shard_dir, shard_dir)
+    finally:
+        del shard_ds
+        if os.path.exists(tmp_shard_dir):
+            shutil.rmtree(tmp_shard_dir, ignore_errors=True)
 
 
 def resolve_output_dataset_name(explicit_name, image_size, split):

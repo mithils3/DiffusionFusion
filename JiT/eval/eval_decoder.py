@@ -129,6 +129,11 @@ def cleanup_distributed(is_distributed: bool) -> None:
         dist.destroy_process_group()
 
 
+def log_rank0(rank: int, message: str) -> None:
+    if rank == 0:
+        print(message, flush=True)
+
+
 def maybe_append_split_suffix(dataset_name: str, split: str) -> str:
     if split == "train" or dataset_name.endswith(f"_{split}"):
         return dataset_name
@@ -296,12 +301,14 @@ def autocast_context(device: torch.device):
 def main() -> None:
     args = parse_args()
     device, rank, world_size, is_distributed = init_distributed(args.device)
+    log_rank0(rank, f"Starting decoder eval on device={device}, world_size={world_size}, split={args.split}.")
 
     checkpoint_path = Path(args.checkpoint).expanduser().resolve()
     if not checkpoint_path.is_file():
         cleanup_distributed(is_distributed)
         raise FileNotFoundError(f"Decoder checkpoint not found: {checkpoint_path}")
 
+    log_rank0(rank, f"Loading checkpoint from {checkpoint_path}")
     checkpoint_payload = torch.load(checkpoint_path, map_location="cpu")
     checkpoint_args = load_checkpoint_args(checkpoint_payload)
     checkpoint_key = select_checkpoint_key(args, checkpoint_payload)
@@ -330,8 +337,20 @@ def main() -> None:
         "vit_base_patch16_dinov3.lvd1689m",
     )
 
+    log_rank0(
+        rank,
+        "Inspecting feature shards: "
+        f"latents={latent_dir_name}, dino={dino_dir_name}, feature_root={args.feature_root}",
+    )
+
     latent_store = inspect_feature_shards(args.feature_root, latent_dir_name)
     dino_store = inspect_feature_shards(args.feature_root, dino_dir_name)
+    log_rank0(
+        rank,
+        "Loaded shard metadata: "
+        f"latents={latent_store.total_size} samples across {len(latent_store.shard_spans)} shards, "
+        f"dino={dino_store.total_size} samples across {len(dino_store.shard_spans)} shards.",
+    )
     dataset = RamLoadedShardDataset(
         latent_store=latent_store,
         dino_store=dino_store,
@@ -353,6 +372,7 @@ def main() -> None:
         num_workers=0,
         pin_memory=pin_mem and device.type == "cuda",
     )
+    log_rank0(rank, f"Built dataloader with {len(data_loader)} batches per rank and batch_size={batch_size}.")
 
     total_available_images = len(data_loader) * batch_size * world_size
     raw_dataset_size = data_loader.dataset.image_store.dataset_size
@@ -379,15 +399,21 @@ def main() -> None:
         reference_dir.mkdir(parents=True, exist_ok=True)
         recon_dir.mkdir(parents=True, exist_ok=True)
     barrier_if_distributed(is_distributed)
+    log_rank0(
+        rank,
+        f"Writing reference images to {reference_dir} and reconstructions to {recon_dir}.",
+    )
 
     model = build_decoder_model_from_args(checkpoint_args).to(device)
     model.load_state_dict(checkpoint_payload[checkpoint_key], strict=True)
     model.eval()
+    log_rank0(rank, f"Model loaded with checkpoint key `{checkpoint_key}` from epoch {checkpoint_epoch}.")
 
     image_mean, image_std = extract_image_normalization(data_loader)
 
     local_mse_sum = 0.0
     local_mse_count = 0
+    log_rank0(rank, f"Starting reconstruction loop for up to {target_num_images} images.")
     progress = tqdm(data_loader, total=len(data_loader), desc=f"Rank {rank}", disable=rank != 0)
     for step_idx, batch in enumerate(progress):
         latent = batch["latent"].to(device, non_blocking=True)
@@ -430,6 +456,7 @@ def main() -> None:
     recon_mse = float(mse_stats[0].item() / max(mse_stats[1].item(), 1.0))
 
     if rank == 0:
+        log_rank0(rank, "Reconstruction loop finished. Computing FID.")
         fid = run_pytorch_fid(
             reference_dir=reference_dir,
             recon_dir=recon_dir,

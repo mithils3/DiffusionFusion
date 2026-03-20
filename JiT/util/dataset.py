@@ -1,4 +1,5 @@
 import gc
+import json
 import os
 from bisect import bisect_right
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -19,6 +20,55 @@ def resolve_feature_dataset_root(data_path: str, dataset_dir_name: str) -> str:
     if os.path.isdir(dataset_dir_name):
         return dataset_dir_name
     return os.path.join(data_path, dataset_dir_name)
+
+
+def _describe_file_state(path: str) -> str:
+    if not os.path.exists(path):
+        return "missing"
+    try:
+        size = os.path.getsize(path)
+    except OSError as exc:
+        return f"unreadable ({exc})"
+    if size == 0:
+        return "empty"
+    return f"{size} bytes"
+
+
+def _feature_shard_dirs(dataset_root: str) -> List[str]:
+    pattern = os.path.join(
+        dataset_root, "shard_[0-9][0-9][0-9][0-9][0-9]_[0-9][0-9][0-9][0-9][0-9]"
+    )
+    return sorted(path for path in glob(pattern) if os.path.isdir(path))
+
+
+def _load_feature_shard_dataset(shard_dir: str, dataset_dir_name: str):
+    state_path = os.path.join(shard_dir, "state.json")
+    dataset_info_path = os.path.join(shard_dir, "dataset_info.json")
+    file_states = {
+        "state.json": _describe_file_state(state_path),
+        "dataset_info.json": _describe_file_state(dataset_info_path),
+    }
+    missing_or_empty = [
+        name for name, state in file_states.items() if state in {"missing", "empty"}
+    ]
+    if missing_or_empty:
+        raise RuntimeError(
+            f"{dataset_dir_name} shard {shard_dir} is incomplete: "
+            f"{', '.join(f'{name}={file_states[name]}' for name in missing_or_empty)}. "
+            "This usually means feature extraction was interrupted after creating the shard "
+            "directory. Delete the broken shard directory and regenerate the features."
+        )
+
+    try:
+        return load_from_disk(shard_dir)
+    except (json.JSONDecodeError, FileNotFoundError, OSError, ValueError) as exc:
+        raise RuntimeError(
+            f"Failed to load {dataset_dir_name} shard {shard_dir}. "
+            f"Metadata status: state.json={file_states['state.json']}, "
+            f"dataset_info.json={file_states['dataset_info.json']}. "
+            "This shard is likely incomplete or corrupt; delete it and regenerate the "
+            f"features. Original error: {type(exc).__name__}: {exc}"
+        ) from exc
 
 @dataclass(frozen=True)
 class DatasetShardSpan:
@@ -58,7 +108,7 @@ class LogicalShardSpan:
 
 def inspect_feature_shards(data_path: str, dataset_dir_name: str) -> FeatureShardStore:
     dataset_root = resolve_feature_dataset_root(data_path, dataset_dir_name)
-    shard_dirs = sorted(glob(os.path.join(dataset_root, "shard_*")))
+    shard_dirs = _feature_shard_dirs(dataset_root)
     if not shard_dirs:
         raise FileNotFoundError(
             f"No shard directories found under {dataset_root}"
@@ -70,7 +120,7 @@ def inspect_feature_shards(data_path: str, dataset_dir_name: str) -> FeatureShar
     bytes_per_sample = None
 
     for shard_dir in shard_dirs:
-        shard_dataset = load_from_disk(shard_dir)
+        shard_dataset = _load_feature_shard_dataset(shard_dir, dataset_dir_name)
         shard_size = len(shard_dataset)
         if shard_size == 0:
             continue
