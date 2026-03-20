@@ -131,7 +131,7 @@ class RawImageStore:
         data_path: str,
         sample_id_store: FeatureShardStore,
         model_name: str = "vit_base_patch16_dinov3.lvd1689m",
-        image_size: int = 256,
+        image_size: int = 224,
         split: str = "train",
     ):
         self.dataset = _load_raw_image_dataset(data_path, split=split)
@@ -353,7 +353,7 @@ class RamLoadedShardDataset(IterableDataset):
         image_data_path: Optional[str] = None,
         image_data_split: str = "train",
         image_model_name: str = "vit_base_patch16_dinov3.lvd1689m",
-        image_size: int = 256,
+        image_size: int = 224,
     ):
         if num_replicas < 0:
             num_replicas = dist.get_world_size() if dist.is_initialized() else 1

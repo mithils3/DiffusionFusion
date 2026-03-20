@@ -24,7 +24,6 @@ IMAGE_DATA_PATH="ILSVRC/imagenet-1k"
 
 FEATURE_ROOT="/work/hdd/bgnp/msalunkhe/data/imagenet"
 OUTPUT_DIR="${OUTPUT_DIR:-/work/nvme/bgnp/msalunkhe/outputs/jit_decoder_small_ctxconcat_512_r1_image_mean_no_cap}"
-FID_STATS_PATH="/work/nvme/betw/msalunkhe/data/jit_in256_stats.npz"
 BATCH_SIZE="${BATCH_SIZE:-96}"
 EPOCHS="${EPOCHS:-16}"
 EVAL_FREQ="${EVAL_FREQ:-2}"
@@ -79,7 +78,6 @@ OMP_NUM_THREADS=16 torchrun \
   --dino_dir_name imagenet224_dinov3_features \
   --output_dir "${OUTPUT_DIR}" \
   --wandb_run_name "${WANDB_RUN_NAME}" \
-  --decoder_eval_fid_stats "${FID_STATS_PATH}" \
   --batch_size "${BATCH_SIZE}" \
   --epochs "${EPOCHS}" \
   --eval_freq "${EVAL_FREQ}" \

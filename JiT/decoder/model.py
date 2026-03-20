@@ -22,7 +22,7 @@ class Decoder(nn.Module):
         proj_drop=0.0,
         num_heads=8,
         mlp_ratio=4.0,
-        output_image_size: int = 256,
+        output_image_size: int = 224,
     ) -> None:
         super().__init__()
         self.eva_hidden_size = eva_hidden_size

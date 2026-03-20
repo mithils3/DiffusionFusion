@@ -31,8 +31,8 @@ class DecoderModelConfig:
     depth: int = 12
     num_heads: int = 16
     mlp_ratio: float = 4.0
-    patch_size: int = 16
-    output_image_size: int = 256
+    patch_size: int = 14
+    output_image_size: int = 224
     noise_tau: float = 0.4
 
 
@@ -49,7 +49,7 @@ class DecoderTrainingConfig:
 class DiscriminatorArchConfig:
     backbone_model_name: str = "timm/vit_small_patch16_dinov3.lvd1689m"
     dino_ckpt_path: str | None = None
-    input_size: int = 256
+    input_size: int = 224
     feature_dim: int = 384
     ks: int = 9
     norm_type: NormType = "gn"

@@ -165,7 +165,7 @@ class DinoPatchDiscriminator(nn.Module):
         self,
         backbone_model_name: str = "timm/vit_small_patch16_dinov3.lvd1689m",
         checkpoint_path: str | None = None,
-        input_size: int = 256,
+        input_size: int = 224,
         feature_dim: int = 384,
         kernel_size: int = 9,
         norm_type: str = "gn",

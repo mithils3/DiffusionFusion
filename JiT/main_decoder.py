@@ -26,7 +26,6 @@ torch.backends.cudnn.allow_tf32 = True
 torch.backends.cudnn.benchmark = True
 
 _DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "decoder" / "default_config.yaml"
-_DEFAULT_FID_STATS_PATH = "/work/nvme/betw/msalunkhe/data/jit_in256_stats.npz"
 
 
 @torch.no_grad()
@@ -273,13 +272,26 @@ def get_args_parser() -> argparse.ArgumentParser:
     # logging / eval
     parser.add_argument("--output_dir", default="./output_dir_decoder", type=str)
     parser.add_argument("--resume", default="", type=str)
-    parser.add_argument("--decoder_eval_reference_dir", default=None, type=str)
+    parser.add_argument(
+        "--decoder_eval_reference_dir",
+        default=None,
+        type=str,
+        help="Deprecated and ignored. Online decoder eval now writes reference images from the dataloader.",
+    )
     parser.add_argument(
         "--decoder_eval_fid_stats",
-        default=_DEFAULT_FID_STATS_PATH,
+        default=None,
         type=str,
-        help="Path to a torch-fidelity FID statistics .npz file used for decoder eval.",
+        help="Deprecated and ignored. Online decoder eval now computes folder-based FID directly.",
     )
+    parser.add_argument("--decoder_eval_fid_batch_size", default=256, type=int)
+    parser.add_argument(
+        "--decoder_eval_fid_dims",
+        default=2048,
+        type=int,
+        choices=[64, 192, 768, 2048],
+    )
+    parser.add_argument("--decoder_eval_fid_num_workers", default=4, type=int)
     parser.add_argument("--decoder_eval_metrics", action="store_true")
     parser.add_argument("--no_decoder_eval_metrics", action="store_false", dest="decoder_eval_metrics")
     parser.set_defaults(decoder_eval_metrics=True)
