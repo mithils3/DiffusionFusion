@@ -11,7 +11,7 @@ import torch.backends.cudnn as cudnn
 from torch.utils.tensorboard import SummaryWriter
 
 import JiT.util.misc as misc
-from JiT.decoder import Decoder, DecoderReconstructionModel, load_decoder_plan_config
+from JiT.decoder import Decoder, load_decoder_plan_config
 from JiT.decoder.dataset import RamLoadedShardDataset, inspect_feature_shards
 from JiT.decoder.train import evaluate, train_epoch
 
@@ -351,8 +351,8 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def build_decoder_model(args: argparse.Namespace) -> DecoderReconstructionModel:
-    decoder = Decoder(
+def build_decoder_model(args: argparse.Namespace) -> Decoder:
+    return Decoder(
         patch_size=args.decoder_patch_size,
         eva_hidden_size=args.eva_hidden_size,
         dino_hidden_size=args.dino_hidden_size,
@@ -365,7 +365,6 @@ def build_decoder_model(args: argparse.Namespace) -> DecoderReconstructionModel:
         mlp_ratio=args.decoder_mlp_ratio,
         output_image_size=args.decoder_output_image_size,
     )
-    return DecoderReconstructionModel(decoder)
 
 
 def save_decoder_checkpoint(

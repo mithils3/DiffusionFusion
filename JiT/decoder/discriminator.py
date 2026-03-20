@@ -44,16 +44,50 @@ def _maybe_spectral_norm(module: nn.Module, enabled: bool) -> nn.Module:
     return spectral_norm(module) if enabled else module
 
 
-def _load_checkpoint_if_present(module: nn.Module, checkpoint_path: str | None) -> None:
-    if not checkpoint_path or not os.path.exists(checkpoint_path):
-        return
-    state_dict = torch.load(checkpoint_path, map_location="cpu")
-    if isinstance(state_dict, dict):
+def _extract_checkpoint_state_dict(payload: object) -> dict[str, torch.Tensor]:
+    if isinstance(payload, dict):
         for key in ("state_dict", "model", "teacher"):
-            if key in state_dict and isinstance(state_dict[key], dict):
-                state_dict = state_dict[key]
+            nested = payload.get(key)
+            if isinstance(nested, dict):
+                payload = nested
                 break
-    module.load_state_dict(state_dict, strict=False)
+    if not isinstance(payload, dict):
+        raise TypeError(
+            f"Expected discriminator checkpoint payload to be a state dict mapping, got {type(payload).__name__}."
+        )
+    return payload
+
+
+def _is_classifier_key(key: str) -> bool:
+    return key.startswith(("head.", "fc.", "classifier."))
+
+
+def _load_checkpoint(module: nn.Module, checkpoint_path: str) -> None:
+    if not os.path.exists(checkpoint_path):
+        raise FileNotFoundError(
+            f"Decoder discriminator checkpoint not found: {checkpoint_path}"
+        )
+
+    state_dict = _extract_checkpoint_state_dict(
+        torch.load(checkpoint_path, map_location="cpu")
+    )
+    incompatible = module.load_state_dict(state_dict, strict=False)
+    missing_keys = [
+        key for key in incompatible.missing_keys if not _is_classifier_key(key)
+    ]
+    unexpected_keys = [
+        key for key in incompatible.unexpected_keys if not _is_classifier_key(key)
+    ]
+    if missing_keys or unexpected_keys:
+        problems = []
+        if missing_keys:
+            problems.append(f"missing keys: {missing_keys}")
+        if unexpected_keys:
+            problems.append(f"unexpected keys: {unexpected_keys}")
+        raise RuntimeError(
+            f"Decoder discriminator checkpoint {checkpoint_path} is incompatible with "
+            f"{module.__class__.__name__}; {'; '.join(problems)}."
+        )
 
 
 def _tokens_to_feature_map(
@@ -199,21 +233,16 @@ class DinoPatchDiscriminator(nn.Module):
                 "timm is required to build the decoder discriminator backbone."
             ) from exc
 
-        has_checkpoint = bool(checkpoint_path and os.path.exists(checkpoint_path))
-        if checkpoint_path and not has_checkpoint:
-            print(
-                f"Decoder discriminator checkpoint not found at {checkpoint_path}; "
-                "falling back to timm pretrained weights."
-            )
+        use_checkpoint = bool(checkpoint_path)
 
         backbone = timm.create_model(
             backbone_model_name,
-            pretrained=pretrained and not has_checkpoint,
+            pretrained=pretrained and not use_checkpoint,
             num_classes=0,
         )
         data_config = timm.data.resolve_model_data_config(backbone)
-        if has_checkpoint:
-            _load_checkpoint_if_present(backbone, checkpoint_path)
+        if use_checkpoint:
+            _load_checkpoint(backbone, checkpoint_path)
         mean = tuple(data_config.get("mean", _DEFAULT_BACKBONE_MEAN))
         std = tuple(data_config.get("std", _DEFAULT_BACKBONE_STD))
         return backbone, mean, std

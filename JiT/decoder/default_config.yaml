@@ -20,10 +20,7 @@ training:
   scheduler:
     type: cosine
     warmup_epochs: 1
-    decay_end_epoch: 16
-    base_lr: 2.0e-4
     final_lr: 2.0e-5
-    warmup_from_zero: true
 
 gan:
   disc:
@@ -35,7 +32,6 @@ gan:
       ks: 9
       norm_type: gn
       using_spec_norm: true
-      recipe: S_16
       freeze_backbone: false
     optimizer:
       lr: 2.0e-4

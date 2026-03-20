@@ -26,16 +26,6 @@ from JiT.decoder.losses import (
     vanilla_generator_loss,
 )
 
-try:
-    import wandb
-except ImportError:
-    wandb = None
-
-try:
-    import torch_fidelity
-except ImportError:
-    torch_fidelity = None
-
 def _dist_barrier():
     if misc.is_dist_avail_and_initialized():
         torch.distributed.barrier()
@@ -166,9 +156,27 @@ def _reduce_metrics(metrics: dict[str, float]) -> dict[str, float]:
     return {name: misc.all_reduce_mean(value) for name, value in metrics.items()}
 
 
+def _require_wandb():
+    try:
+        import wandb
+    except ImportError as exc:
+        raise ImportError(
+            "wandb is not installed. Install it with `pip install wandb` or disable --use_wandb."
+        ) from exc
+    return wandb
+
+
+def _require_torch_fidelity():
+    try:
+        import torch_fidelity
+    except ImportError as exc:
+        raise ImportError(
+            "torch_fidelity is not installed. Install it to run decoder evaluation metrics."
+        ) from exc
+    return torch_fidelity
+
+
 def _apply_discriminator_augment(images: torch.Tensor, gan_state: DecoderGanTrainingState) -> torch.Tensor:
-    if gan_state.discriminator_augment is None:
-        return images
     gan_state.discriminator_augment.train(True)
     return gan_state.discriminator_augment(images)
 
@@ -499,13 +507,10 @@ def evaluate(
     )
     eval_image_interval = max(1, args.wandb_eval_image_interval)
     wandb_table = None
+    wandb_module = None
     if misc.is_main_process() and wandb_run is not None:
-        if wandb is None:
-            raise ImportError(
-                "wandb is not installed. Install it with `pip install wandb` or disable --use_wandb."
-            )
-
-        wandb_table = wandb.Table(
+        wandb_module = _require_wandb()
+        wandb_table = wandb_module.Table(
             columns=[
                 "epoch",
                 "global_index",
@@ -578,11 +583,11 @@ def evaluate(
                         global_index,
                         sample_id,
                         class_id,
-                        wandb.Image(
+                        wandb_module.Image(
                             target_uint8[sample_idx],
                             caption=f"target class={class_id}, sample_id={sample_id}",
                         ),
-                        wandb.Image(
+                        wandb_module.Image(
                             reconstructed_image,
                             caption=f"recon class={class_id}, sample_id={sample_id}",
                         ),
@@ -634,10 +639,7 @@ def evaluate(
         _dist_barrier()
 
     if distribution_metrics_requested and misc.is_main_process():
-        if torch_fidelity is None:
-            raise ImportError(
-                "torch_fidelity is not installed. Install it to run decoder evaluation metrics."
-            )
+        torch_fidelity = _require_torch_fidelity()
         if reference_dir and not os.path.isdir(reference_dir):
             raise FileNotFoundError(
                 f"Decoder eval reference directory not found: {reference_dir}"

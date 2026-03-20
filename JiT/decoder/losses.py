@@ -3,19 +3,6 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 
-try:
-    import lpips
-except ImportError:
-    lpips = None
-
-
-def l1_reconstruction_loss(reconstructed: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    return torch.mean(torch.abs(reconstructed - target))
-
-
-def mse_reconstruction_loss(reconstructed: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    return torch.mean((reconstructed - target) ** 2)
-
 
 def hinge_discriminator_loss(real_logits: torch.Tensor, fake_logits: torch.Tensor) -> torch.Tensor:
     real_loss = torch.relu(1.0 - real_logits).mean()
@@ -45,10 +32,6 @@ def vanilla_generator_loss(fake_logits: torch.Tensor) -> torch.Tensor:
     return -fake_logits.mean()
 
 
-def zero_loss_like(reference: torch.Tensor) -> torch.Tensor:
-    return reference.new_zeros(())
-
-
 def _prepare_lpips_input(
     images: torch.Tensor,
     image_mean: torch.Tensor | None = None,
@@ -68,10 +51,12 @@ class LPIPSLoss(nn.Module):
 
     def __init__(self, net: str = "vgg") -> None:
         super().__init__()
-        if lpips is None:
+        try:
+            import lpips
+        except ImportError as exc:
             raise ImportError(
                 "lpips is not installed. Install it to use perceptual decoder loss."
-            )
+            ) from exc
         self.metric = lpips.LPIPS(net=net)
 
     def forward(
@@ -109,10 +94,10 @@ def build_decoder_loss_breakdown(
     use_perceptual: bool = True,
     use_adversarial: bool = True,
 ) -> DecoderLossBreakdown:
-    reconstruction = l1_reconstruction_loss(reconstructed, target)
-    mse = mse_reconstruction_loss(reconstructed, target)
-    perceptual = zero_loss_like(reconstruction)
-    adversarial = zero_loss_like(reconstruction)
+    reconstruction = torch.mean(torch.abs(reconstructed - target))
+    mse = torch.mean((reconstructed - target) ** 2)
+    perceptual = reconstruction.new_zeros(())
+    adversarial = reconstruction.new_zeros(())
 
     if use_perceptual and perceptual_loss_module is not None:
         perceptual = perceptual_loss_module(

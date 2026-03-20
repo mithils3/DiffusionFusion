@@ -14,7 +14,7 @@ from PIL import Image
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from JiT.decoder import Decoder, DecoderReconstructionModel
+from JiT.decoder import Decoder
 from JiT.decoder.dataset import RamLoadedShardDataset, inspect_feature_shards
 
 
@@ -180,11 +180,11 @@ def select_checkpoint_key(args: argparse.Namespace, checkpoint_payload: dict) ->
     return args.checkpoint_key
 
 
-def build_decoder_model_from_args(checkpoint_args: argparse.Namespace) -> DecoderReconstructionModel:
-    decoder = Decoder(
+def build_decoder_model_from_args(checkpoint_args: argparse.Namespace) -> Decoder:
+    return Decoder(
         patch_size=int(require_checkpoint_arg(checkpoint_args, "decoder_patch_size")),
-        eva_hidden_size=int(getattr(checkpoint_args, "eva_hidden_size", 384)),
-        dino_hidden_size=int(getattr(checkpoint_args, "dino_hidden_size", 384)),
+        eva_hidden_size=int(require_checkpoint_arg(checkpoint_args, "eva_hidden_size")),
+        dino_hidden_size=int(require_checkpoint_arg(checkpoint_args, "dino_hidden_size")),
         hidden_size=int(require_checkpoint_arg(checkpoint_args, "decoder_hidden_size")),
         out_channels=int(require_checkpoint_arg(checkpoint_args, "image_out_channels")),
         depth=int(require_checkpoint_arg(checkpoint_args, "decoder_depth")),
@@ -194,7 +194,6 @@ def build_decoder_model_from_args(checkpoint_args: argparse.Namespace) -> Decode
         mlp_ratio=float(require_checkpoint_arg(checkpoint_args, "decoder_mlp_ratio")),
         output_image_size=int(require_checkpoint_arg(checkpoint_args, "decoder_output_image_size")),
     )
-    return DecoderReconstructionModel(decoder)
 
 
 def resolve_batch_size(

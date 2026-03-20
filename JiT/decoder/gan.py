@@ -18,7 +18,7 @@ class DecoderGanTrainingState:
     discriminator: nn.Module
     discriminator_optimizer: torch.optim.Optimizer
     perceptual_loss: nn.Module | None
-    discriminator_augment: nn.Module | None
+    discriminator_augment: nn.Module
     noise_tau: float
     disc_lr: float
     disc_min_lr: float
@@ -29,9 +29,7 @@ class DecoderGanTrainingState:
     discriminator_step: int = 0
 
 
-def set_requires_grad(module: nn.Module | None, flag: bool) -> None:
-    if module is None:
-        return
+def set_requires_grad(module: nn.Module, flag: bool) -> None:
     for parameter in module.parameters():
         parameter.requires_grad_(flag)
 
@@ -72,13 +70,11 @@ def get_decoder_last_layer(model: nn.Module) -> torch.nn.Parameter:
     decoder = getattr(model, "decoder", model)
     final_layer = getattr(decoder, "final_layer", None)
     linear = getattr(final_layer, "linear", None)
-    if linear is not None and hasattr(linear, "weight"):
-        return linear.weight
-
-    named_parameters = list(model.named_parameters())
-    if not named_parameters:
-        raise ValueError("Cannot compute adaptive GAN weight for a model without parameters.")
-    return named_parameters[-1][1]
+    if linear is None or not hasattr(linear, "weight"):
+        raise AttributeError(
+            "Adaptive decoder GAN weighting expects decoder.final_layer.linear.weight."
+        )
+    return linear.weight
 
 
 def calculate_adaptive_weight(
@@ -92,17 +88,12 @@ def calculate_adaptive_weight(
         reconstruction_loss,
         last_layer,
         retain_graph=True,
-        allow_unused=True,
     )[0]
     generator_grad = torch.autograd.grad(
         generator_loss,
         last_layer,
         retain_graph=True,
-        allow_unused=True,
     )[0]
-
-    if reconstruction_grad is None or generator_grad is None:
-        return last_layer.new_tensor(1.0)
 
     d_weight = torch.norm(reconstruction_grad) / (torch.norm(generator_grad) + eps)
     d_weight = torch.clamp(d_weight, 0.0, max_d_weight)
@@ -161,8 +152,14 @@ def build_decoder_gan_training_state(
     if loss_config.perceptual_weight > 0.0:
         perceptual_loss = LPIPSLoss(net=args.decoder_lpips_net).to(device)
 
+    augment_config = disc_defaults.augment
     discriminator_augment = DiscriminatorAugment(
-        **disc_defaults.augment.build_kwargs()
+        prob=augment_config.prob,
+        cutout=augment_config.cutout,
+        brightness=augment_config.brightness,
+        contrast=augment_config.contrast,
+        saturation=augment_config.saturation,
+        horizontal_flip=augment_config.horizontal_flip,
     ).to(device)
 
     return DecoderGanTrainingState(

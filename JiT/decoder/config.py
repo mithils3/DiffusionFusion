@@ -1,11 +1,6 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
 from typing import Any, Literal
-
-try:
-    import yaml
-except ImportError:
-    yaml = None
 
 
 DiscLossName = Literal["hinge"]
@@ -25,10 +20,7 @@ class OptimizerConfig:
 class SchedulerConfig:
     type: SchedulerType = "cosine"
     warmup_epochs: int = 1
-    decay_end_epoch: int = 16
-    base_lr: float = 2.0e-4
     final_lr: float = 2.0e-5
-    warmup_from_zero: bool = True
 
 
 @dataclass(frozen=True)
@@ -62,20 +54,7 @@ class DiscriminatorArchConfig:
     ks: int = 9
     norm_type: NormType = "gn"
     using_spec_norm: bool = True
-    recipe: str = "S_16"
     freeze_backbone: bool = False
-
-    def build_kwargs(self) -> dict[str, object]:
-        return {
-            "backbone_model_name": self.backbone_model_name,
-            "checkpoint_path": self.dino_ckpt_path,
-            "input_size": self.input_size,
-            "feature_dim": self.feature_dim,
-            "kernel_size": self.ks,
-            "norm_type": self.norm_type,
-            "using_spec_norm": self.using_spec_norm,
-            "freeze_backbone": self.freeze_backbone,
-        }
 
 
 @dataclass(frozen=True)
@@ -86,16 +65,6 @@ class DiscriminatorAugmentConfig:
     contrast: float = 0.2
     saturation: float = 0.2
     horizontal_flip: bool = True
-
-    def build_kwargs(self) -> dict[str, object]:
-        return {
-            "prob": self.prob,
-            "cutout": self.cutout,
-            "brightness": self.brightness,
-            "contrast": self.contrast,
-            "saturation": self.saturation,
-            "horizontal_flip": self.horizontal_flip,
-        }
 
 
 @dataclass(frozen=True)
@@ -157,15 +126,11 @@ class DecoderPlanConfig:
     gan: DecoderGanConfig = field(default_factory=DecoderGanConfig)
 
 
-def default_decoder_plan_config() -> DecoderPlanConfig:
-    return DecoderPlanConfig()
-
-
-def _coerce_betas(value: Any, default: tuple[float, float]) -> tuple[float, float]:
-    if value is None:
-        return default
+def _coerce_betas(value: Any) -> tuple[float, float]:
     if isinstance(value, tuple):
-        return value
+        if len(value) != 2:
+            raise ValueError(f"Expected exactly 2 beta values, got {value}.")
+        return float(value[0]), float(value[1])
     if isinstance(value, list):
         if len(value) != 2:
             raise ValueError(f"Expected exactly 2 beta values, got {value}.")
@@ -173,171 +138,84 @@ def _coerce_betas(value: Any, default: tuple[float, float]) -> tuple[float, floa
     raise TypeError(f"Unsupported optimizer betas value: {value!r}")
 
 
-def _build_optimizer_config(data: dict[str, Any] | None, defaults: OptimizerConfig) -> OptimizerConfig:
-    if not data:
-        return defaults
-    return OptimizerConfig(
-        lr=float(data.get("lr", defaults.lr)),
-        betas=_coerce_betas(data.get("betas"), defaults.betas),
-        weight_decay=float(data.get("weight_decay", defaults.weight_decay)),
-    )
+def _require_mapping(path: str, data: Any) -> dict[str, Any]:
+    if not isinstance(data, dict):
+        raise TypeError(f"{path} must be a mapping, got {type(data).__name__}.")
+    return data
 
 
-def _build_scheduler_config(data: dict[str, Any] | None, defaults: SchedulerConfig) -> SchedulerConfig:
-    if not data:
-        return defaults
-    return SchedulerConfig(
-        type=str(data.get("type", defaults.type)),
-        warmup_epochs=int(data.get("warmup_epochs", defaults.warmup_epochs)),
-        decay_end_epoch=int(data.get("decay_end_epoch", defaults.decay_end_epoch)),
-        base_lr=float(data.get("base_lr", defaults.base_lr)),
-        final_lr=float(data.get("final_lr", defaults.final_lr)),
-        warmup_from_zero=bool(data.get("warmup_from_zero", defaults.warmup_from_zero)),
-    )
+def _coerce_scalar(raw_value: Any, default_value: Any, *, path: str) -> Any:
+    if isinstance(default_value, bool):
+        if not isinstance(raw_value, bool):
+            raise TypeError(f"{path} must be a boolean, got {raw_value!r}.")
+        return raw_value
+    if isinstance(default_value, int) and not isinstance(default_value, bool):
+        return int(raw_value)
+    if isinstance(default_value, float):
+        return float(raw_value)
+    if isinstance(default_value, str):
+        return str(raw_value)
+    if default_value is None:
+        if raw_value is None or isinstance(raw_value, str):
+            return raw_value
+        raise TypeError(f"{path} must be a string or null, got {raw_value!r}.")
+    return raw_value
 
 
-def _build_decoder_model_config(
-    data: dict[str, Any] | None,
-    defaults: DecoderModelConfig,
-) -> DecoderModelConfig:
-    if not data:
-        return defaults
-    return DecoderModelConfig(
-        eva_hidden_size=int(data.get("eva_hidden_size", defaults.eva_hidden_size)),
-        dino_hidden_size=int(data.get("dino_hidden_size", defaults.dino_hidden_size)),
-        hidden_size=int(data.get("hidden_size", defaults.hidden_size)),
-        depth=int(data.get("depth", defaults.depth)),
-        num_heads=int(data.get("num_heads", defaults.num_heads)),
-        mlp_ratio=float(data.get("mlp_ratio", defaults.mlp_ratio)),
-        patch_size=int(data.get("patch_size", defaults.patch_size)),
-        output_image_size=int(data.get("output_image_size", defaults.output_image_size)),
-        noise_tau=float(data.get("noise_tau", defaults.noise_tau)),
-    )
+def _merge_dataclass(defaults: Any, data: dict[str, Any], *, path: str) -> Any:
+    mapping = _require_mapping(path, data)
+    allowed_keys = {field.name for field in fields(defaults)}
+    unknown_keys = sorted(set(mapping) - allowed_keys)
+    if unknown_keys:
+        raise KeyError(f"Unsupported keys in {path}: {', '.join(unknown_keys)}.")
 
+    values = {}
+    for dataclass_field in fields(defaults):
+        field_name = dataclass_field.name
+        default_value = getattr(defaults, field_name)
+        if field_name not in mapping:
+            values[field_name] = default_value
+            continue
 
-def _build_decoder_training_config(
-    data: dict[str, Any] | None,
-    defaults: DecoderTrainingConfig,
-) -> DecoderTrainingConfig:
-    if not data:
-        return defaults
-    return DecoderTrainingConfig(
-        epochs=int(data.get("epochs", defaults.epochs)),
-        ema_decay=float(data.get("ema_decay", defaults.ema_decay)),
-        global_batch_size=int(data.get("global_batch_size", defaults.global_batch_size)),
-        optimizer=_build_optimizer_config(data.get("optimizer"), defaults.optimizer),
-        scheduler=_build_scheduler_config(data.get("scheduler"), defaults.scheduler),
-    )
-
-
-def _build_discriminator_arch_config(
-    data: dict[str, Any] | None,
-    defaults: DiscriminatorArchConfig,
-) -> DiscriminatorArchConfig:
-    if not data:
-        return defaults
-    return DiscriminatorArchConfig(
-        backbone_model_name=str(data.get("backbone_model_name", defaults.backbone_model_name)),
-        dino_ckpt_path=data.get("dino_ckpt_path", defaults.dino_ckpt_path),
-        input_size=int(data.get("input_size", defaults.input_size)),
-        feature_dim=int(data.get("feature_dim", defaults.feature_dim)),
-        ks=int(data.get("ks", defaults.ks)),
-        norm_type=str(data.get("norm_type", defaults.norm_type)),
-        using_spec_norm=bool(data.get("using_spec_norm", defaults.using_spec_norm)),
-        recipe=str(data.get("recipe", defaults.recipe)),
-        freeze_backbone=bool(data.get("freeze_backbone", defaults.freeze_backbone)),
-    )
-
-
-def _build_discriminator_augment_config(
-    data: dict[str, Any] | None,
-    defaults: DiscriminatorAugmentConfig,
-) -> DiscriminatorAugmentConfig:
-    if not data:
-        return defaults
-    return DiscriminatorAugmentConfig(
-        prob=float(data.get("prob", defaults.prob)),
-        cutout=float(data.get("cutout", defaults.cutout)),
-        brightness=float(data.get("brightness", defaults.brightness)),
-        contrast=float(data.get("contrast", defaults.contrast)),
-        saturation=float(data.get("saturation", defaults.saturation)),
-        horizontal_flip=bool(data.get("horizontal_flip", defaults.horizontal_flip)),
-    )
-
-
-def _build_discriminator_config(
-    data: dict[str, Any] | None,
-    defaults: DiscriminatorConfig,
-) -> DiscriminatorConfig:
-    if not data:
-        return defaults
-    return DiscriminatorConfig(
-        arch=_build_discriminator_arch_config(data.get("arch"), defaults.arch),
-        optimizer=_build_optimizer_config(data.get("optimizer"), defaults.optimizer),
-        augment=_build_discriminator_augment_config(data.get("augment"), defaults.augment),
-    )
-
-
-def _build_decoder_loss_config(
-    data: dict[str, Any] | None,
-    defaults: DecoderLossConfig,
-) -> DecoderLossConfig:
-    if not data:
-        return defaults
-    return DecoderLossConfig(
-        disc_loss=str(data.get("disc_loss", defaults.disc_loss)),
-        gen_loss=str(data.get("gen_loss", defaults.gen_loss)),
-        disc_weight=float(data.get("disc_weight", defaults.disc_weight)),
-        perceptual_weight=float(data.get("perceptual_weight", defaults.perceptual_weight)),
-        adaptive_weight=bool(data.get("adaptive_weight", defaults.adaptive_weight)),
-        disc_start=int(data.get("disc_start", defaults.disc_start)),
-        disc_upd_start=int(data.get("disc_upd_start", defaults.disc_upd_start)),
-        adversarial_warmup_epochs=float(
-            data.get("adversarial_warmup_epochs", defaults.adversarial_warmup_epochs)
-        ),
-        lpips_start=int(data.get("lpips_start", defaults.lpips_start)),
-        max_d_weight=float(data.get("max_d_weight", defaults.max_d_weight)),
-        disc_updates=int(data.get("disc_updates", defaults.disc_updates)),
-        r1_weight=float(data.get("r1_weight", defaults.r1_weight)),
-        r1_interval=int(data.get("r1_interval", defaults.r1_interval)),
-    )
-
-
-def _build_decoder_gan_config(
-    data: dict[str, Any] | None,
-    defaults: DecoderGanConfig,
-) -> DecoderGanConfig:
-    if not data:
-        return defaults
-    return DecoderGanConfig(
-        disc=_build_discriminator_config(data.get("disc"), defaults.disc),
-        loss=_build_decoder_loss_config(data.get("loss"), defaults.loss),
-    )
+        raw_value = mapping[field_name]
+        field_path = f"{path}.{field_name}"
+        if is_dataclass(default_value):
+            values[field_name] = _merge_dataclass(
+                default_value,
+                _require_mapping(field_path, raw_value),
+                path=field_path,
+            )
+        elif field_name == "betas":
+            values[field_name] = _coerce_betas(raw_value)
+        else:
+            values[field_name] = _coerce_scalar(raw_value, default_value, path=field_path)
+    return type(defaults)(**values)
 
 
 def load_decoder_plan_config(path: str | None = None) -> DecoderPlanConfig:
-    defaults = default_decoder_plan_config()
+    defaults = DecoderPlanConfig()
     if path is None:
         return defaults
-    if yaml is None:
+
+    try:
+        import yaml
+    except ImportError as exc:
         raise ImportError(
             "PyYAML is required to load decoder config files. Install `pyyaml` or omit --config."
-        )
+        ) from exc
 
     config_path = Path(path)
     if not config_path.exists():
         raise FileNotFoundError(f"Decoder config file not found: {config_path}")
 
     with config_path.open("r", encoding="utf-8") as handle:
-        payload = yaml.safe_load(handle) or {}
+        payload = yaml.safe_load(handle)
 
+    if payload is None:
+        raise ValueError(f"Decoder config file is empty: {config_path}")
     if not isinstance(payload, dict):
         raise TypeError(
             f"Decoder config file must contain a mapping at the top level, got {type(payload).__name__}."
         )
 
-    return DecoderPlanConfig(
-        decoder=_build_decoder_model_config(payload.get("decoder"), defaults.decoder),
-        training=_build_decoder_training_config(payload.get("training"), defaults.training),
-        gan=_build_decoder_gan_config(payload.get("gan"), defaults.gan),
-    )
+    return _merge_dataclass(defaults, payload, path="decoder config")

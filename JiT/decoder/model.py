@@ -220,22 +220,6 @@ class Decoder(nn.Module):
         """Inference entrypoint expected by decoder evaluation."""
         return self.forward(eva, dino)
 
-
-class DecoderReconstructionModel(nn.Module):
-    """Wrap a decoder with the train/eval API used by ``JiT/decoder/train.py``."""
-
-    def __init__(self, decoder: nn.Module) -> None:
-        super().__init__()
-        self.decoder = decoder
-
-    def generate(self, eva, dino):
-        """Reconstruct RGB images from aligned EVA and DINO features."""
-        return self.decoder.generate(eva, dino)
-
-    def forward(self, eva, dino):
-        return self.generate(eva, dino)
-
-
 class CrossAttention(nn.Module):
     """Self-attention over decoder queries followed by cross-attention into context."""
 
@@ -366,16 +350,3 @@ class DecoderFinalLayer(nn.Module):
         x = self.norm_final(x)
         x = self.linear(x)
         return x
-
-
-def Small(**kwargs):
-    return Decoder(
-        patch_size=16,
-        eva_hidden_size=384,
-        dino_hidden_size=384,
-        hidden_size=768,
-        out_channels=3,
-        depth=12,
-        output_image_size=256,
-        **kwargs,
-    )

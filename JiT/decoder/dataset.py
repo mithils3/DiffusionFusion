@@ -402,7 +402,6 @@ class RamLoadedShardDataset(IterableDataset):
 
         self._cached_epoch = None
         self._cached_plan = None
-        self._warned_label_mismatch = False
 
     def _select_logical_shard_store(self) -> FeatureShardStore:
         return max(
@@ -483,7 +482,7 @@ class RamLoadedShardDataset(IterableDataset):
                 f"[{shard_span.global_start}, {shard_span.global_end})."
             )
         label_mismatch = eva_rows["label"] != dino_rows["label"]
-        if np.any(label_mismatch) and not self._warned_label_mismatch:
+        if np.any(label_mismatch):
             mismatch_indices = np.flatnonzero(label_mismatch)[:5]
             mismatch_examples = [
                 (
@@ -493,14 +492,13 @@ class RamLoadedShardDataset(IterableDataset):
                 )
                 for idx in mismatch_indices
             ]
-            print(
-                "Warning: EVA and DINO labels diverged for "
+            raise ValueError(
+                "EVA and DINO labels diverged for "
                 f"{int(label_mismatch.sum())} samples in RAM shard "
                 f"[{shard_span.global_start}, {shard_span.global_end}). "
-                "Continuing with EVA labels for decoder training. "
+                "Decoder training requires aligned labels. "
                 f"Examples (sample_id, eva_label, dino_label): {mismatch_examples}"
             )
-            self._warned_label_mismatch = True
 
         return {
             "eva": eva_rows["feature"],
