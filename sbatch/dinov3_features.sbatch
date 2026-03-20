@@ -22,7 +22,7 @@ cd /u/msalunkhe/DiffusionFusion/JiT
 git pull
 IMAGENET_PATH="ILSVRC/imagenet-1k"
 OUTPUT_DIR="/work/hdd/bgnp/msalunkhe/data/imagenet"
-SPLIT="${SPLIT:-train}"
+SPLIT="${SPLIT:-validation}"
 # Avoid thread explosion across DDP ranks + DataLoader workers.
 torchrun --nproc_per_node=auto --nnodes=1 --node_rank=0 \
 feature_extraction/dinov3.py \
@@ -31,10 +31,3 @@ feature_extraction/dinov3.py \
 --split "${SPLIT}" \
 --image-size 256 \
 --num-workers 4
-torchrun --nproc_per_node=auto --nnodes=1 --node_rank=0 \
-  eval/eval_sdxl_vae.py \
-  --data-path ILSVRC/imagenet-1k \
-  --output-dir /work/nvme/bgnp/msalunkhe/outputs/sdxl_vae_eval \
-  --num-images 10000 \
-  --batch-size 128 \
-  --num-workers 4
