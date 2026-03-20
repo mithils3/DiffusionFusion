@@ -5,7 +5,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
-#SBATCH --gpus-per-node=2
+#SBATCH --gpus-per-node=1
 #SBATCH --mem=256G
 #SBATCH --time=08:00:00
 #SBATCH -o slurm-%j.out
@@ -25,7 +25,7 @@ FEATURE_ROOT="${FEATURE_ROOT:-/work/hdd/bgnp/msalunkhe/data/imagenet}"
 IMAGE_DATA_PATH="${IMAGE_DATA_PATH:-ILSVRC/imagenet-1k}"
 SPLIT="${SPLIT:-validation}"
 NUM_IMAGES="${NUM_IMAGES:-50000}"
-BATCH_SIZE="${BATCH_SIZE:-96}"
+BATCH_SIZE="${BATCH_SIZE:-100}"
 FID_BATCH_SIZE="${FID_BATCH_SIZE:-256}"
 FID_NUM_WORKERS="${FID_NUM_WORKERS:-4}"
 CHECKPOINT_KEY="${CHECKPOINT_KEY:-auto}"
@@ -41,7 +41,7 @@ fi
 mkdir -p "${OUTPUT_DIR}"
 
 OMP_NUM_THREADS=16 torchrun \
-  --nproc_per_node=auto \
+  --nproc_per_node=1 \
   --nnodes=1 \
   --node_rank=0 \
   JiT/eval/eval_decoder.py \
