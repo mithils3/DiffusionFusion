@@ -27,9 +27,14 @@ def r1_gradient_penalty(
     real_logits: torch.Tensor,
     real_images: torch.Tensor,
 ) -> torch.Tensor:
-    """R1 gradient penalty: penalize squared gradient norm on real images."""
+    """R1 gradient penalty on one discriminator score per image.
+
+    For patch or multi-scale discriminators, reduce non-batch dimensions to a
+    single per-image score before differentiating w.r.t. the real image.
+    """
+    real_scores = real_logits.reshape(real_logits.shape[0], -1).mean(dim=1)
     (grad_real,) = torch.autograd.grad(
-        outputs=real_logits.sum(),
+        outputs=real_scores.sum(),
         inputs=real_images,
         create_graph=True,
     )

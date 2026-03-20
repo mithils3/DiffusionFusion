@@ -216,13 +216,9 @@ def _discriminator_step(
     if r1_weight > 0.0:
         raw_r1_penalty = r1_gradient_penalty(real_logits.float(), real_disc_images)
         raw_r1_penalty_value = float(raw_r1_penalty.item())
-        effective_r1_penalty = raw_r1_penalty
-        r1_max_penalty = gan_state.loss_config.r1_max_penalty
-        if r1_max_penalty is not None:
-            effective_r1_penalty = torch.clamp(effective_r1_penalty, max=r1_max_penalty)
-        r1_loss = r1_weight * 0.5 * effective_r1_penalty
+        r1_loss = r1_weight * 0.5 * raw_r1_penalty
         disc_loss = disc_loss + r1_loss
-        r1_penalty_value = float(effective_r1_penalty.item())
+        r1_penalty_value = raw_r1_penalty_value
         r1_loss_value = float(r1_loss.item())
 
     disc_loss_value = float(disc_loss.item())

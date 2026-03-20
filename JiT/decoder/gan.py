@@ -130,11 +130,6 @@ def build_decoder_gan_training_state(
         disc_updates=int(args.decoder_disc_updates),
         r1_weight=float(plan.gan.loss.r1_weight),
         r1_interval=int(plan.gan.loss.r1_interval),
-        r1_max_penalty=(
-            None
-            if plan.gan.loss.r1_max_penalty is None
-            else float(plan.gan.loss.r1_max_penalty)
-        ),
     )
 
     discriminator = DinoPatchDiscriminator(

@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -J JiT_decoder
+#SBATCH -J JiT_decoder_r1_image_mean_no_cap
 #SBATCH -A bgnp-dtai-gh
 #SBATCH -p ghx4
 #SBATCH --nodes=1
@@ -23,7 +23,7 @@ git pull
 IMAGE_DATA_PATH="ILSVRC/imagenet-1k"
 
 FEATURE_ROOT="/work/hdd/bgnp/msalunkhe/data/imagenet"
-OUTPUT_DIR="/work/nvme/bgnp/msalunkhe/outputs/jit_decoder_small_gan_lower_noise_r1_norm"
+OUTPUT_DIR="/work/nvme/bgnp/msalunkhe/outputs/jit_decoder_small_gan_lower_noise_r1_image_mean_no_cap"
 FID_STATS_PATH="/work/nvme/betw/msalunkhe/data/jit_in256_stats.npz"
 mkdir -p "${OUTPUT_DIR}"
 
@@ -38,6 +38,7 @@ OMP_NUM_THREADS=16 torchrun \
   --latent_dir_name imagenet256_latents \
   --dino_dir_name imagenet256_dinov3_features \
   --output_dir "${OUTPUT_DIR}" \
+  --wandb_run_name "jit_decoder_small_gan_lower_noise_r1_image_mean_no_cap" \
   --decoder_eval_fid_stats "${FID_STATS_PATH}" \
   --batch_size 96 \
   --epochs 12 \
