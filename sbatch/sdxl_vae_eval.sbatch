@@ -32,7 +32,7 @@ OMP_NUM_THREADS=16 torchrun \
   --data-path "${IMAGE_DATA_PATH}" \
   --output-dir "${OUTPUT_DIR}" \
   --split validation \
-  --image-size 256 \
+  --image-size 224 \
   --num-images 50000   \
   --batch-size 128 \
   --fid-batch-size 256 \
