@@ -28,12 +28,12 @@ OMP_NUM_THREADS=16 torchrun \
   --nproc_per_node=auto \
   --nnodes=1 \
   --node_rank=0 \
-  JiT/eval_sdxl_vae_rfid.py \
+  JiT/eval/eval_sdxl_vae.py \
   --data-path "${IMAGE_DATA_PATH}" \
   --output-dir "${OUTPUT_DIR}" \
   --split validation \
   --image-size 256 \
-  --num-images 50000 \
+  --num-images 50000   \
   --batch-size 128 \
   --fid-batch-size 256 \
   --num-workers 4

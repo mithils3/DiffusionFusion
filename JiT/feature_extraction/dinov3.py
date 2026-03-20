@@ -43,6 +43,15 @@ def save_feature_shard(output_dir, shard_name, features, labels, sample_ids, hf_
     del shard_ds
 
 
+def resolve_output_dataset_name(explicit_name, image_size, split):
+    if explicit_name:
+        return explicit_name
+    base_name = f"imagenet{image_size}_dinov3_features"
+    if split == "train":
+        return base_name
+    return f"{base_name}_{split}"
+
+
 def main(args):
     """
     Extract DINO features and normalize each spatial token independently across
@@ -79,7 +88,7 @@ def main(args):
         mean=data_config.get("mean"),
         std=data_config.get("std"),
     )
-    dataset = load_dataset(args.data_path, split="train")
+    dataset = load_dataset(args.data_path, split=args.split)
     dataset = dataset.with_transform(
         lambda examples: {
             "image": [transforms(image.convert("RGB")) for image in examples["image"]],
@@ -107,7 +116,12 @@ def main(args):
 
     patches = args.image_size // 16
 
-    output_dir = os.path.join(args.features_path, args.hf_dataset_name)
+    output_dataset_name = resolve_output_dataset_name(
+        args.hf_dataset_name,
+        args.image_size,
+        args.split,
+    )
+    output_dir = os.path.join(args.features_path, output_dataset_name)
     os.makedirs(output_dir, exist_ok=True)
     hf_features = Features(
         {
@@ -173,7 +187,7 @@ def main(args):
 
     dist.barrier()
     if rank == 0:
-        print(f"Saved per-token normalized HF dataset to: {output_dir}")
+        print(f"Saved per-token normalized {args.split} HF dataset to: {output_dir}")
 
     dist.destroy_process_group()
 
@@ -182,13 +196,27 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-path", type=str, required=True)
     parser.add_argument("--features-path", type=str, default="features")
+    parser.add_argument(
+        "--split",
+        type=str,
+        default="train",
+        help='Dataset split to encode. Defaults to "train".',
+    )
     parser.add_argument("--image-size", type=int,
                         choices=[256, 512], default=256)
     parser.add_argument("--global-batch-size", type=int, default=256)
     parser.add_argument("--global-seed", type=int, default=0)
     parser.add_argument("--num-workers", type=int, default=4)
-    parser.add_argument("--hf-dataset-name", type=str,
-                        default="imagenet256_dinov3_features")
+    parser.add_argument(
+        "--hf-dataset-name",
+        type=str,
+        default=None,
+        help=(
+            "Output HF dataset directory name. Defaults to "
+            "`imagenet{image_size}_dinov3_features` for train and "
+            "`imagenet{image_size}_dinov3_features_{split}` for non-train splits."
+        ),
+    )
     parser.add_argument("--model-name", type=str,
                         default="vit_base_patch16_dinov3.lvd1689m")
     parser.add_argument("--hidden-size", type=int, default=768)

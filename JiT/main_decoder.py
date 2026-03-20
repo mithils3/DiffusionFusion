@@ -160,7 +160,13 @@ def get_args_parser() -> argparse.ArgumentParser:
         "--image_data_path",
         required=True,
         type=str,
-        help="HF dataset ID or datasets.load_from_disk directory for raw training images.",
+        help="HF dataset ID or datasets.load_from_disk directory for raw decoder images.",
+    )
+    parser.add_argument(
+        "--image_data_split",
+        default="train",
+        type=str,
+        help='Raw image split aligned with the feature shards. Defaults to "train".',
     )
     parser.add_argument(
         "--latent_dir_name",
@@ -434,6 +440,7 @@ def build_data_loader(
     preload_next_shard: bool,
     preload_next_batch: bool,
     image_data_path: str,
+    image_data_split: str,
     image_model_name: str,
     image_size: int,
     pin_mem: bool,
@@ -449,6 +456,7 @@ def build_data_loader(
         preload_next_shard=preload_next_shard,
         preload_next_batch=preload_next_batch,
         image_data_path=image_data_path,
+        image_data_split=image_data_split,
         image_model_name=image_model_name,
         image_size=image_size,
     )
@@ -516,6 +524,7 @@ def main(args: argparse.Namespace) -> None:
         preload_next_shard=args.ram_shard_prefetch,
         preload_next_batch=args.decoder_batch_prefetch,
         image_data_path=args.image_data_path,
+        image_data_split=args.image_data_split,
         image_model_name=args.image_model_name,
         image_size=args.decoder_output_image_size,
         pin_mem=args.pin_mem,
@@ -531,6 +540,7 @@ def main(args: argparse.Namespace) -> None:
         preload_next_shard=False,
         preload_next_batch=args.decoder_batch_prefetch,
         image_data_path=args.image_data_path,
+        image_data_split=args.image_data_split,
         image_model_name=args.image_model_name,
         image_size=args.decoder_output_image_size,
         pin_mem=args.pin_mem,

@@ -59,18 +59,18 @@ def _parse_rank_from_shard_path(path: str) -> int:
     return int(parts[1])
 
 
-def _load_raw_image_dataset(data_path: str):
+def _load_raw_image_dataset(data_path: str, split: str = "train"):
     if os.path.isdir(data_path):
         dataset = load_from_disk(data_path)
         if hasattr(dataset, "keys"):
-            if "train" not in dataset:
+            if split not in dataset:
                 raise KeyError(
-                    f'Expected a "train" split in decoder image dataset at {data_path}.'
+                    f'Expected a "{split}" split in decoder image dataset at {data_path}.'
                 )
-            return dataset["train"]
+            return dataset[split]
         return dataset
 
-    return load_dataset(data_path, split="train")
+    return load_dataset(data_path, split=split)
 
 
 class RawImageStore:
@@ -82,8 +82,9 @@ class RawImageStore:
         sample_id_store: FeatureShardStore,
         model_name: str = "vit_base_patch16_dinov3.lvd1689m",
         image_size: int = 256,
+        split: str = "train",
     ):
-        self.dataset = _load_raw_image_dataset(data_path)
+        self.dataset = _load_raw_image_dataset(data_path, split=split)
         self.dataset_size = len(self.dataset)
 
         rank_ids = sorted({_parse_rank_from_shard_path(span.path)
@@ -300,6 +301,7 @@ class RamLoadedShardDataset(IterableDataset):
         preload_next_shard: bool = True,
         preload_next_batch: bool = True,
         image_data_path: Optional[str] = None,
+        image_data_split: str = "train",
         image_model_name: str = "vit_base_patch16_dinov3.lvd1689m",
         image_size: int = 256,
     ):
@@ -334,6 +336,7 @@ class RamLoadedShardDataset(IterableDataset):
         self.image_store = RawImageStore(
             image_data_path,
             latent_store,
+            split=image_data_split,
             model_name=image_model_name,
             image_size=image_size,
         )

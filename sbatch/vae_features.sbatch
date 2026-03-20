@@ -21,9 +21,11 @@ source /u/msalunkhe/.venv/bin/activate
 cd /u/msalunkhe/DiffusionFusion/JiT
 IMAGENET_PATH="ILSVRC/imagenet-1k"
 OUTPUT_DIR="/work/hdd/bgnp/msalunkhe/data/imagenet"
+SPLIT="${SPLIT:-train}"
 # Avoid thread explosion across DDP ranks + DataLoader workers.
 torchrun --nproc_per_node=auto --nnodes=1 --node_rank=0 \
 feature_extraction/vae.py \
 --data-path ${IMAGENET_PATH}  \
 --features-path ${OUTPUT_DIR} \
+--split "${SPLIT}" \
 --num-workers 4

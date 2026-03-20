@@ -108,6 +108,15 @@ def save_feature_shard(output_dir, shard_name, features, labels, sample_ids, hf_
     del shard_ds
 
 
+def resolve_output_dataset_name(explicit_name, image_size, split):
+    if explicit_name:
+        return explicit_name
+    base_name = f"imagenet{image_size}_latents"
+    if split == "train":
+        return base_name
+    return f"{base_name}_{split}"
+
+
 def main(args):
     """
     Trains a new DiT model.
@@ -143,7 +152,7 @@ def main(args):
         mean=(0.5, 0.5, 0.5),
         std=(0.5, 0.5, 0.5),
     )
-    dataset = load_dataset(args.data_path, split="train")
+    dataset = load_dataset(args.data_path, split=args.split)
     dataset = dataset.with_format("torch")
     dataset = dataset.with_transform(
         lambda examples: {
@@ -183,6 +192,13 @@ def main(args):
         (4, latent_size, latent_size), args.max_shard_size_mb)
     print(f"Rank {rank}: writing approximately {samples_per_shard} samples per shard.")
 
+    output_dataset_name = resolve_output_dataset_name(
+        args.hf_dataset_name,
+        args.image_size,
+        args.split,
+    )
+    output_dir = os.path.join(args.features_path, output_dataset_name)
+
     feature_buf = []
     label_buf = []
     sample_id_buf = []
@@ -212,7 +228,7 @@ def main(args):
             if len(feature_buf) >= samples_per_shard:
                 shard_name = f"shard_{rank:05d}_{shard_idx:05d}"
                 save_feature_shard(
-                    output_dir=os.path.join(args.features_path, args.hf_dataset_name),
+                    output_dir=output_dir,
                     shard_name=shard_name,
                     features=feature_buf,
                     labels=label_buf,
@@ -224,7 +240,6 @@ def main(args):
                 sample_id_buf = []
                 shard_idx += 1
 
-    output_dir = os.path.join(args.features_path, args.hf_dataset_name)
     os.makedirs(output_dir, exist_ok=True)
     if feature_buf:
         shard_name = f"shard_{rank:05d}_{shard_idx:05d}"
@@ -240,7 +255,7 @@ def main(args):
 
     dist.barrier()
     if rank == 0:
-        print(f"Saved HF dataset to: {output_dir}")
+        print(f"Saved {args.split} HF dataset to: {output_dir}")
 
     cleanup()
 
@@ -250,12 +265,27 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-path", type=str, required=True)
     parser.add_argument("--features-path", type=str, default="features")
+    parser.add_argument(
+        "--split",
+        type=str,
+        default="train",
+        help='Dataset split to encode. Defaults to "train".',
+    )
     parser.add_argument("--image-size", type=int,
                         choices=[256, 512], default=256)
     parser.add_argument("--global-batch-size", type=int, default=256)
     parser.add_argument("--global-seed", type=int, default=0)
     parser.add_argument("--num-workers", type=int, default=4)
-    parser.add_argument("--hf-dataset-name", type=str, default="imagenet256_latents")
+    parser.add_argument(
+        "--hf-dataset-name",
+        type=str,
+        default=None,
+        help=(
+            "Output HF dataset directory name. Defaults to "
+            "`imagenet{image_size}_latents` for train and "
+            "`imagenet{image_size}_latents_{split}` for non-train splits."
+        ),
+    )
     parser.add_argument("--max-shard-size-mb", type=int, default=1024)
     args = parser.parse_args()
     main(args)
