@@ -26,7 +26,6 @@ class DecoderGanTrainingState:
     disc_total_epochs: int
     disc_lr_schedule: str
     disc_lr_epoch_offset: float
-    discriminator_step: int = 0
 
 
 def set_requires_grad(module: nn.Module, flag: bool) -> None:
@@ -115,8 +114,6 @@ def build_decoder_gan_training_state(
         lpips_start=int(args.decoder_lpips_start),
         max_d_weight=float(args.decoder_max_d_weight),
         disc_updates=int(args.decoder_disc_updates),
-        r1_weight=float(plan.gan.loss.r1_weight),
-        r1_interval=int(plan.gan.loss.r1_interval),
     )
 
     discriminator = DinoPatchDiscriminator(
@@ -129,6 +126,9 @@ def build_decoder_gan_training_state(
         using_spec_norm=bool(args.decoder_disc_using_spec_norm),
         freeze_backbone=bool(args.decoder_disc_freeze_backbone),
         pretrained=bool(args.decoder_disc_pretrained),
+        recipe=str(args.decoder_disc_recipe),
+        key_depths=args.decoder_disc_key_depths,
+        norm_eps=float(args.decoder_disc_norm_eps),
     ).to(device)
     if misc.is_dist_avail_and_initialized():
         device_ids = [device.index] if device.type == "cuda" and device.index is not None else None
@@ -171,5 +171,4 @@ def build_decoder_gan_training_state(
         disc_total_epochs=int(args.decoder_disc_epochs),
         disc_lr_schedule=str(args.decoder_disc_lr_schedule),
         disc_lr_epoch_offset=float(loss_config.disc_upd_start),
-        discriminator_step=0,
     )

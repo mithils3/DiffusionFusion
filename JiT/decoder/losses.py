@@ -7,25 +7,7 @@ from torch import nn
 def hinge_discriminator_loss(real_logits: torch.Tensor, fake_logits: torch.Tensor) -> torch.Tensor:
     real_loss = torch.relu(1.0 - real_logits).mean()
     fake_loss = torch.relu(1.0 + fake_logits).mean()
-    return real_loss + fake_loss
-
-
-def r1_gradient_penalty(
-    real_logits: torch.Tensor,
-    real_images: torch.Tensor,
-) -> torch.Tensor:
-    """R1 gradient penalty on one discriminator score per image.
-
-    For patch or multi-scale discriminators, reduce non-batch dimensions to a
-    single per-image score before differentiating w.r.t. the real image.
-    """
-    real_scores = real_logits.reshape(real_logits.shape[0], -1).mean(dim=1)
-    (grad_real,) = torch.autograd.grad(
-        outputs=real_scores.sum(),
-        inputs=real_images,
-        create_graph=True,
-    )
-    return grad_real.pow(2).reshape(grad_real.shape[0], -1).sum(1).mean()
+    return 0.5 * (real_loss + fake_loss)
 
 
 def vanilla_generator_loss(fake_logits: torch.Tensor) -> torch.Tensor:

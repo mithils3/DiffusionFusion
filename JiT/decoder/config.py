@@ -46,24 +46,27 @@ class DecoderTrainingConfig:
 
 @dataclass(frozen=True)
 class DiscriminatorArchConfig:
-    backbone_model_name: str = "timm/vit_small_patch16_dinov3.lvd1689m"
+    backbone_model_name: str = "timm/vit_small_patch8_224.dino"
     dino_ckpt_path: str | None = None
     input_size: int = 224
     feature_dim: int = 384
     ks: int = 9
-    norm_type: NormType = "gn"
+    norm_type: NormType = "bn"
     using_spec_norm: bool = True
-    freeze_backbone: bool = False
+    freeze_backbone: bool = True
+    recipe: str = "S_8"
+    key_depths: tuple[int, ...] = (2, 5, 8, 11)
+    norm_eps: float = 1.0e-6
 
 
 @dataclass(frozen=True)
 class DiscriminatorAugmentConfig:
-    prob: float = 0.5
+    prob: float = 1.0
     cutout: float = 0.0
-    brightness: float = 0.2
-    contrast: float = 0.2
-    saturation: float = 0.2
-    horizontal_flip: bool = True
+    brightness: float = 0.0
+    contrast: float = 0.0
+    saturation: float = 0.0
+    horizontal_flip: bool = False
 
 
 @dataclass(frozen=True)
@@ -82,23 +85,16 @@ class DecoderLossConfig:
     adaptive_weight: bool = True
     disc_start: int = 8
     disc_upd_start: int = 6
-    adversarial_warmup_epochs: float = 1.0
+    adversarial_warmup_epochs: float = 0.0
     lpips_start: int = 0
-    max_d_weight: float = 4.0
+    max_d_weight: float = 10000.0
     disc_updates: int = 1
-    r1_weight: float = 0.0
-    r1_interval: int = 16
 
     def perceptual_enabled(self, epoch: int) -> bool:
         return epoch >= self.lpips_start
 
     def discriminator_updates_enabled(self, epoch: int) -> bool:
         return epoch >= self.disc_upd_start
-
-    def r1_enabled_for_step(self, discriminator_step: int) -> bool:
-        if self.r1_weight <= 0.0 or self.r1_interval <= 0:
-            return False
-        return discriminator_step % self.r1_interval == 0
 
     def adversarial_enabled(self, epoch: int) -> bool:
         return epoch >= self.disc_start

@@ -224,6 +224,18 @@ def get_args_parser() -> argparse.ArgumentParser:
         default=disc_defaults.arch.dino_ckpt_path,
         type=str,
     )
+    parser.add_argument(
+        "--decoder_disc_recipe",
+        default=disc_defaults.arch.recipe,
+        type=str,
+    )
+    parser.add_argument(
+        "--decoder_disc_key_depths",
+        nargs="+",
+        default=list(disc_defaults.arch.key_depths),
+        type=int,
+    )
+    parser.add_argument("--decoder_disc_norm_eps", default=disc_defaults.arch.norm_eps, type=float)
     parser.add_argument("--decoder_disc_input_size", default=disc_defaults.arch.input_size, type=int)
     parser.add_argument("--decoder_disc_feature_dim", default=disc_defaults.arch.feature_dim, type=int)
     parser.add_argument("--decoder_disc_kernel_size", default=disc_defaults.arch.ks, type=int)
@@ -333,6 +345,7 @@ def parse_args() -> argparse.Namespace:
     args.decoder_plan = load_decoder_plan_config(args.config)
     args.optimizer_betas = tuple(float(beta) for beta in args.optimizer_betas)
     args.decoder_disc_betas = tuple(float(beta) for beta in args.decoder_disc_betas)
+    args.decoder_disc_key_depths = tuple(int(depth) for depth in args.decoder_disc_key_depths)
 
     if args.decoder_disc_min_lr is None:
         args.decoder_disc_min_lr = args.min_lr
