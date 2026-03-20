@@ -58,7 +58,7 @@ gan:
     disc_upd_start: 4
     adversarial_warmup_epochs: 2.0
     lpips_start: 0
-    max_d_weight: 5.0
+    max_d_weight: 2.0
     disc_updates: 1
-    r1_weight: 10.0
+    r1_weight: 1.0
     r1_interval: 16
