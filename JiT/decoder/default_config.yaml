@@ -1,8 +1,8 @@
 decoder:
   eva_hidden_size: 384
   dino_hidden_size: 384
-  hidden_size: 1152
-  depth: 12
+  hidden_size: 512
+  depth: 16
   num_heads: 16
   mlp_ratio: 4.0
   patch_size: 14
