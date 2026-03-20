@@ -184,7 +184,7 @@ def build_decoder_model_from_args(checkpoint_args: argparse.Namespace) -> Decode
     decoder = Decoder(
         patch_size=int(require_checkpoint_arg(checkpoint_args, "decoder_patch_size")),
         eva_hidden_size=int(getattr(checkpoint_args, "eva_hidden_size", 384)),
-        dino_hidden_size=int(require_checkpoint_arg(checkpoint_args, "dino_hidden_size")),
+        dino_hidden_size=int(getattr(checkpoint_args, "dino_hidden_size", 384)),
         hidden_size=int(require_checkpoint_arg(checkpoint_args, "decoder_hidden_size")),
         out_channels=int(require_checkpoint_arg(checkpoint_args, "image_out_channels")),
         depth=int(require_checkpoint_arg(checkpoint_args, "decoder_depth")),

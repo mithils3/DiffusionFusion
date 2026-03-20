@@ -34,7 +34,7 @@ class SchedulerConfig:
 @dataclass(frozen=True)
 class DecoderModelConfig:
     eva_hidden_size: int = 384
-    dino_hidden_size: int = 768
+    dino_hidden_size: int = 384
     hidden_size: int = 1152
     depth: int = 12
     num_heads: int = 16

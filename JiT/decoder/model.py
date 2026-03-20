@@ -372,7 +372,7 @@ def Small(**kwargs):
     return Decoder(
         patch_size=16,
         eva_hidden_size=384,
-        dino_hidden_size=768,
+        dino_hidden_size=384,
         hidden_size=768,
         out_channels=3,
         depth=12,
