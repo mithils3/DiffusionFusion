@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -J JiT_decoder_ctxsum_256
+#SBATCH -J JiT_decoder_ctxconcat_512
 #SBATCH -A bgnp-dtai-gh
 #SBATCH -p ghx4
 #SBATCH --nodes=1
@@ -23,13 +23,13 @@ git pull
 IMAGE_DATA_PATH="ILSVRC/imagenet-1k"
 
 FEATURE_ROOT="/work/hdd/bgnp/msalunkhe/data/imagenet"
-OUTPUT_DIR="${OUTPUT_DIR:-/work/nvme/bgnp/msalunkhe/outputs/jit_decoder_small_ctxsum_256_r1_image_mean_no_cap}"
+OUTPUT_DIR="${OUTPUT_DIR:-/work/nvme/bgnp/msalunkhe/outputs/jit_decoder_small_ctxconcat_512_r1_image_mean_no_cap}"
 FID_STATS_PATH="/work/nvme/betw/msalunkhe/data/jit_in256_stats.npz"
 BATCH_SIZE="${BATCH_SIZE:-96}"
 EPOCHS="${EPOCHS:-16}"
 EVAL_FREQ="${EVAL_FREQ:-2}"
 NUM_IMAGES="${NUM_IMAGES:-10000}"
-WANDB_RUN_NAME="${WANDB_RUN_NAME:-jit_decoder_small_ctxsum_256_r1_image_mean_no_cap}"
+WANDB_RUN_NAME="${WANDB_RUN_NAME:-jit_decoder_small_ctxconcat_512_r1_image_mean_no_cap}"
 
 # Optional paper-inspired ablations. Leave unset to use config defaults.
 NOISE_TAU="${NOISE_TAU:-}"
@@ -75,8 +75,8 @@ OMP_NUM_THREADS=16 torchrun \
   --config decoder/default_config.yaml \
   --data_path "${FEATURE_ROOT}" \
   --image_data_path "${IMAGE_DATA_PATH}" \
-  --latent_dir_name imagenet256_latents \
-  --dino_dir_name imagenet256_dinov3_features \
+  --eva_dir_name imagenet224_eva02_small_features \
+  --dino_dir_name imagenet224_dinov3_features \
   --output_dir "${OUTPUT_DIR}" \
   --wandb_run_name "${WANDB_RUN_NAME}" \
   --decoder_eval_fid_stats "${FID_STATS_PATH}" \

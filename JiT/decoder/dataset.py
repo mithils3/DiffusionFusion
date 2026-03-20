@@ -14,7 +14,7 @@ import torch.distributed as dist
 from datasets import load_dataset, load_from_disk
 from torch.utils.data import IterableDataset
 
-from JiT.util.feature_normalization import normalize_dino_feature_map_tokens
+from JiT.util.feature_normalization import normalize_feature_map_tokens
 from JiT.util.image_transforms import build_center_crop_normalize_transform
 
 
@@ -335,13 +335,13 @@ class RamLoadedShardDataset(IterableDataset):
     """Iterable dataset that keeps one logical shard pair per rank in RAM.
 
     Logical shards are derived from the larger feature tensor family so that
-    the in-memory working set stays bounded even when the latent and DINO
+    the in-memory working set stays bounded even when the EVA and DINO
     shard sample counts differ.
     """
 
     def __init__(
         self,
-        latent_store: FeatureShardStore,
+        eva_store: FeatureShardStore,
         dino_store: FeatureShardStore,
         batch_size: int,
         num_replicas: int = -1,
@@ -363,9 +363,9 @@ class RamLoadedShardDataset(IterableDataset):
             raise ValueError(
                 "batch_size must be positive for RAM shard loading.")
 
-        if latent_store.total_size != dino_store.total_size:
+        if eva_store.total_size != dino_store.total_size:
             raise ValueError(
-                f"Latent dataset has {latent_store.total_size} samples but DINO dataset has "
+                f"EVA dataset has {eva_store.total_size} samples but DINO dataset has "
                 f"{dino_store.total_size}; RAM shard loading requires aligned datasets."
             )
         if not image_data_path:
@@ -373,7 +373,7 @@ class RamLoadedShardDataset(IterableDataset):
                 "RamLoadedShardDataset requires image_data_path because decoder training always needs raw images."
             )
 
-        self.latent_store = latent_store
+        self.eva_store = eva_store
         self.dino_store = dino_store
         self.batch_size = batch_size
         self.num_replicas = num_replicas
@@ -385,7 +385,7 @@ class RamLoadedShardDataset(IterableDataset):
         self.epoch = 0
         self.image_store = RawImageStore(
             image_data_path,
-            latent_store,
+            eva_store,
             split=image_data_split,
             model_name=image_model_name,
             image_size=image_size,
@@ -406,7 +406,7 @@ class RamLoadedShardDataset(IterableDataset):
 
     def _select_logical_shard_store(self) -> FeatureShardStore:
         return max(
-            (self.latent_store, self.dino_store),
+            (self.eva_store, self.dino_store),
             key=lambda store: (
                 store.bytes_per_sample,
                 len(store.shard_spans),
@@ -470,49 +470,50 @@ class RamLoadedShardDataset(IterableDataset):
         }
 
     def _load_logical_shard(self, shard_span: LogicalShardSpan) -> Dict[str, np.ndarray]:
-        latent_rows = _load_feature_range_to_ram(
-            self.latent_store, shard_span.global_start, shard_span.global_end
+        eva_rows = _load_feature_range_to_ram(
+            self.eva_store, shard_span.global_start, shard_span.global_end
         )
         dino_rows = _load_feature_range_to_ram(
             self.dino_store, shard_span.global_start, shard_span.global_end
         )
 
-        if not np.array_equal(latent_rows["sample_id"], dino_rows["sample_id"]):
+        if not np.array_equal(eva_rows["sample_id"], dino_rows["sample_id"]):
             raise ValueError(
-                "Latent and DINO sample_id alignment diverged while materializing RAM shard "
+                "EVA and DINO sample_id alignment diverged while materializing RAM shard "
                 f"[{shard_span.global_start}, {shard_span.global_end})."
             )
-        label_mismatch = latent_rows["label"] != dino_rows["label"]
+        label_mismatch = eva_rows["label"] != dino_rows["label"]
         if np.any(label_mismatch) and not self._warned_label_mismatch:
             mismatch_indices = np.flatnonzero(label_mismatch)[:5]
             mismatch_examples = [
                 (
-                    int(latent_rows["sample_id"][idx]),
-                    int(latent_rows["label"][idx]),
+                    int(eva_rows["sample_id"][idx]),
+                    int(eva_rows["label"][idx]),
                     int(dino_rows["label"][idx]),
                 )
                 for idx in mismatch_indices
             ]
             print(
-                "Warning: latent and DINO labels diverged for "
+                "Warning: EVA and DINO labels diverged for "
                 f"{int(label_mismatch.sum())} samples in RAM shard "
                 f"[{shard_span.global_start}, {shard_span.global_end}). "
-                "Continuing with latent labels to match the legacy training path. "
-                f"Examples (sample_id, latent_label, dino_label): {mismatch_examples}"
+                "Continuing with EVA labels for decoder training. "
+                f"Examples (sample_id, eva_label, dino_label): {mismatch_examples}"
             )
             self._warned_label_mismatch = True
 
         return {
-            "latent": latent_rows["feature"],
+            "eva": eva_rows["feature"],
             "dino": dino_rows["feature"],
-            "y": latent_rows["label"],
-            "sample_id": latent_rows["sample_id"],
+            "y": eva_rows["label"],
+            "sample_id": eva_rows["sample_id"],
         }
 
     def _format_batch(self, rows: Dict[str, np.ndarray]) -> Dict[str, torch.Tensor]:
-        dino = normalize_dino_feature_map_tokens(torch.from_numpy(rows["dino"]))
+        eva = normalize_feature_map_tokens(torch.from_numpy(rows["eva"]))
+        dino = normalize_feature_map_tokens(torch.from_numpy(rows["dino"]))
         return {
-            "latent": torch.from_numpy(rows["latent"]),
+            "eva": eva,
             "dino": dino,
             "y": torch.from_numpy(rows["y"]),
             "sample_id": torch.from_numpy(rows["sample_id"]),

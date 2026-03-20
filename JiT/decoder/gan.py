@@ -37,23 +37,23 @@ def set_requires_grad(module: nn.Module | None, flag: bool) -> None:
 
 
 def apply_noise_augmentation(
-    latent: torch.Tensor,
+    eva: torch.Tensor,
     dino: torch.Tensor,
     noise_tau: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if noise_tau <= 0.0:
-        return latent, dino
+        return eva, dino
 
-    batch_size = latent.shape[0]
-    latent_sigma = latent.new_empty(batch_size).normal_(mean=0.0, std=noise_tau).abs_()
-    dino_sigma = latent_sigma.to(device=dino.device, dtype=dino.dtype)
+    batch_size = eva.shape[0]
+    eva_sigma = eva.new_empty(batch_size).normal_(mean=0.0, std=noise_tau).abs_()
+    dino_sigma = eva_sigma.to(device=dino.device, dtype=dino.dtype)
 
-    latent_sigma = latent_sigma.view(batch_size, *([1] * (latent.ndim - 1)))
+    eva_sigma = eva_sigma.view(batch_size, *([1] * (eva.ndim - 1)))
     dino_sigma = dino_sigma.view(batch_size, *([1] * (dino.ndim - 1)))
 
-    latent = latent + latent_sigma * torch.randn_like(latent)
+    eva = eva + eva_sigma * torch.randn_like(eva)
     dino = dino + dino_sigma * torch.randn_like(dino)
-    return latent, dino
+    return eva, dino
 
 
 def images_to_minus_one_to_one(

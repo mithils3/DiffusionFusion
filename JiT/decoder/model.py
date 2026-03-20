@@ -3,16 +3,29 @@ import math
 import torch
 from torch import nn
 
-from JiT.model_jit import BottleneckPatchEmbed, RMSNorm, SwiGLUFFN
+from JiT.model_jit import RMSNorm, SwiGLUFFN
 from JiT.util.model_util import get_2d_sincos_pos_embed
 
 
 class Decoder(nn.Module):
-    """Transformer decoder that reconstructs an image from fused DINO and latent tokens."""
+    """Transformer decoder that reconstructs an image from concatenated EVA and DINO tokens."""
 
-    def __init__(self, input_size: int, patch_size: int, latent_patch_size: int, in_channels: int, bottleneck_dim: int, dino_hidden_size: int, hidden_size: int, out_channels: int, depth: int, attn_drop=0.0,
-                 proj_drop=0.0, num_heads=8, mlp_ratio=4.0, output_image_size: int = 256) -> None:
+    def __init__(
+        self,
+        patch_size: int,
+        eva_hidden_size: int,
+        dino_hidden_size: int,
+        hidden_size: int,
+        out_channels: int,
+        depth: int,
+        attn_drop=0.0,
+        proj_drop=0.0,
+        num_heads=8,
+        mlp_ratio=4.0,
+        output_image_size: int = 256,
+    ) -> None:
         super().__init__()
+        self.eva_hidden_size = eva_hidden_size
         self.dino_hidden_size = dino_hidden_size
         self.hidden_size = hidden_size
         self.out_channels = out_channels
@@ -23,22 +36,34 @@ class Decoder(nn.Module):
         self.num_heads = num_heads
         self.mlp_ratio = mlp_ratio
         self.output_image_size = output_image_size
-        self.latent_patch_size = latent_patch_size
 
-        self.latent_tokenizer = BottleneckPatchEmbed(
-            input_size, latent_patch_size, in_channels, bottleneck_dim, hidden_size, bias=True)
-        self.num_patches = self.latent_tokenizer.num_patches
+        if output_image_size % patch_size != 0:
+            raise ValueError(
+                f"output_image_size={output_image_size} must be divisible by patch_size={patch_size}."
+            )
+        self.grid_size = output_image_size // patch_size
+        self.num_patches = self.grid_size ** 2
+
+        self.eva_embedder = nn.Identity() if eva_hidden_size == hidden_size else nn.Linear(
+            eva_hidden_size, hidden_size, bias=True
+        )
         self.dino_embedder = nn.Identity() if dino_hidden_size == hidden_size else nn.Linear(
             dino_hidden_size, hidden_size, bias=True
         )
-        self.pos_embed = nn.Parameter(torch.zeros(
-            1, self.num_patches, hidden_size), requires_grad=False)
+        self.eva_pos_embed = nn.Parameter(
+            torch.zeros(1, self.num_patches, hidden_size), requires_grad=False
+        )
+        self.dino_pos_embed = nn.Parameter(
+            torch.zeros(1, self.num_patches, hidden_size), requires_grad=False
+        )
         self.query_tokens = nn.Parameter(
             torch.zeros(1, self.num_patches, hidden_size)
         )
         self.query_pos_embed = nn.Parameter(
             torch.zeros(1, self.num_patches, hidden_size)
         )
+        self.eva_stream_embed = nn.Parameter(torch.zeros(1, 1, hidden_size))
+        self.dino_stream_embed = nn.Parameter(torch.zeros(1, 1, hidden_size))
         self.final_layer = DecoderFinalLayer(
             hidden_size=hidden_size,
             patch_size=patch_size,
@@ -90,21 +115,18 @@ class Decoder(nn.Module):
 
         self.apply(_basic_init)
 
-        grid_size = int(self.latent_tokenizer.num_patches ** 0.5)
-        pos_embed = get_2d_sincos_pos_embed(
-            self.pos_embed.shape[-1], grid_size)
-        self.pos_embed.data.copy_(
-            torch.from_numpy(pos_embed).float().unsqueeze(0))
+        pos_embed = get_2d_sincos_pos_embed(self.hidden_size, self.grid_size)
+        pos_embed_tensor = torch.from_numpy(pos_embed).float().unsqueeze(0)
+        self.eva_pos_embed.data.copy_(pos_embed_tensor)
+        self.dino_pos_embed.data.copy_(pos_embed_tensor)
         nn.init.normal_(self.query_tokens, std=0.02)
         nn.init.normal_(self.query_pos_embed, std=0.02)
-
-        # Initialize conv patch embed weights like linear layers, matching JiT.
-        w1 = self.latent_tokenizer.proj1.weight.data
-        nn.init.xavier_uniform_(w1.view(w1.shape[0], -1))
-        w2 = self.latent_tokenizer.proj2.weight.data
-        nn.init.xavier_uniform_(w2.view(w2.shape[0], -1))
-        if self.latent_tokenizer.proj2.bias is not None:
-            nn.init.constant_(self.latent_tokenizer.proj2.bias, 0)
+        nn.init.normal_(self.eva_stream_embed, std=0.02)
+        nn.init.normal_(self.dino_stream_embed, std=0.02)
+        if isinstance(self.eva_embedder, nn.Linear):
+            we = self.eva_embedder.weight.data
+            nn.init.xavier_uniform_(we.view(we.shape[0], -1))
+            nn.init.constant_(self.eva_embedder.bias, 0)
         if isinstance(self.dino_embedder, nn.Linear):
             wd = self.dino_embedder.weight.data
             nn.init.xavier_uniform_(wd.view(wd.shape[0], -1))
@@ -122,63 +144,81 @@ class Decoder(nn.Module):
         nn.init.normal_(self.final_layer.linear.weight, std=final_std)
         nn.init.constant_(self.final_layer.linear.bias, 0)
 
-    def _prepare_dino_tokens(self, dino: torch.Tensor) -> torch.Tensor:
-        if dino.ndim == 4:
-            dino = dino.flatten(2).transpose(1, 2)
-        elif dino.ndim != 3:
-            raise ValueError(
-                f"DINO features must be rank-3 or rank-4, got shape {tuple(dino.shape)}."
-            )
-
-        if dino.shape[-1] != self.dino_hidden_size:
-            raise ValueError(
-                f"Expected DINO channel width {self.dino_hidden_size}, got {dino.shape[-1]}."
-            )
-        if dino.shape[1] != self.num_patches:
-            raise ValueError(
-                f"Expected {self.num_patches} DINO tokens to match latent patches, got {dino.shape[1]}."
-            )
-
-        return self.dino_embedder(dino)
-
-    def _fuse_context_tokens(
-        self, dino_tokens: torch.Tensor, latent_tokens: torch.Tensor
+    def _prepare_feature_tokens(
+        self,
+        features: torch.Tensor,
+        *,
+        expected_hidden_size: int,
+        stream_name: str,
     ) -> torch.Tensor:
-        if dino_tokens.shape != latent_tokens.shape:
+        if features.ndim == 4:
+            features = features.flatten(2).transpose(1, 2)
+        elif features.ndim != 3:
             raise ValueError(
-                "Expected aligned DINO and latent token grids before fusion, got "
-                f"{tuple(dino_tokens.shape)} and {tuple(latent_tokens.shape)}."
+                f"{stream_name} features must be rank-3 or rank-4, got shape {tuple(features.shape)}."
             )
 
-        # DINO and latent tokens already share the same spatial grid, so fuse them
-        # position-wise and add positional encoding once on the combined stream.
-        return dino_tokens + latent_tokens + self.pos_embed
+        if features.shape[-1] != expected_hidden_size:
+            raise ValueError(
+                f"Expected {stream_name} channel width {expected_hidden_size}, got {features.shape[-1]}."
+            )
+        if features.shape[1] != self.num_patches:
+            raise ValueError(
+                f"Expected {self.num_patches} {stream_name} tokens, got {features.shape[1]}."
+            )
+        return features
 
-    def forward(self, dino, latent):
+    def _build_context_tokens(
+        self,
+        eva_tokens: torch.Tensor,
+        dino_tokens: torch.Tensor,
+    ) -> torch.Tensor:
+        if eva_tokens.shape[0] != dino_tokens.shape[0]:
+            raise ValueError(
+                "EVA and DINO batch sizes must match before context concatenation, got "
+                f"{eva_tokens.shape[0]} and {dino_tokens.shape[0]}."
+            )
+
+        # With a 16x16 grid this yields 256 EVA tokens + 256 DINO tokens = 512 context tokens.
+        eva_tokens = eva_tokens + self.eva_pos_embed + self.eva_stream_embed
+        dino_tokens = dino_tokens + self.dino_pos_embed + self.dino_stream_embed
+        return torch.cat([eva_tokens, dino_tokens], dim=1)
+
+    def forward(self, eva, dino):
         """
         Decode a pair of aligned context streams into an output image.
 
         Args:
+            eva: EVA features of shape ``[B, D, H, W]`` or EVA tokens ``[B, T, D]``.
             dino: DINO features of shape ``[B, D, H, W]`` or DINO tokens ``[B, T, D]``.
-            latent: Latent feature map consumed by ``latent_tokenizer``.
 
         Returns:
             Reconstructed image tensor of shape ``[B, C, H, W]``.
         """
-        latent_tokens = self.latent_tokenizer(latent)
-        dino_tokens = self._prepare_dino_tokens(dino)
+        eva_tokens = self._prepare_feature_tokens(
+            eva,
+            expected_hidden_size=self.eva_hidden_size,
+            stream_name="EVA",
+        )
+        dino_tokens = self._prepare_feature_tokens(
+            dino,
+            expected_hidden_size=self.dino_hidden_size,
+            stream_name="DINO",
+        )
+        eva_tokens = self.eva_embedder(eva_tokens)
+        dino_tokens = self.dino_embedder(dino_tokens)
 
         # Use one shared set of learnable query slots and broadcast it across the batch.
-        x = self.query_tokens.expand(latent.shape[0], -1, -1)
+        x = self.query_tokens.expand(eva_tokens.shape[0], -1, -1)
         x = x + self.query_pos_embed
-        ctx_tokens = self._fuse_context_tokens(dino_tokens, latent_tokens)
+        ctx_tokens = self._build_context_tokens(eva_tokens, dino_tokens)
         for block in self.blocks:
             x = block(x, ctx_tokens)
         return self.tokens_to_image(x)
 
-    def generate(self, latent, dino):
+    def generate(self, eva, dino):
         """Inference entrypoint expected by decoder evaluation."""
-        return self.forward(dino, latent)
+        return self.forward(eva, dino)
 
 
 class DecoderReconstructionModel(nn.Module):
@@ -188,12 +228,12 @@ class DecoderReconstructionModel(nn.Module):
         super().__init__()
         self.decoder = decoder
 
-    def generate(self, latent, dino):
-        """Reconstruct RGB images from aligned latent and DINO features."""
-        return self.decoder.generate(latent, dino)
+    def generate(self, eva, dino):
+        """Reconstruct RGB images from aligned EVA and DINO features."""
+        return self.decoder.generate(eva, dino)
 
-    def forward(self, latent, dino):
-        return self.generate(latent, dino)
+    def forward(self, eva, dino):
+        return self.generate(eva, dino)
 
 
 class CrossAttention(nn.Module):
@@ -330,11 +370,8 @@ class DecoderFinalLayer(nn.Module):
 
 def Small(**kwargs):
     return Decoder(
-        input_size=32,
         patch_size=16,
-        latent_patch_size=2,
-        in_channels=4,
-        bottleneck_dim=128,
+        eva_hidden_size=384,
         dino_hidden_size=768,
         hidden_size=768,
         out_channels=3,

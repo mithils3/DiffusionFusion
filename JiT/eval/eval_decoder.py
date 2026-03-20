@@ -25,7 +25,7 @@ torch.backends.cudnn.allow_tf32 = True
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Evaluate a trained JiT decoder on saved latent/DINO feature shards and "
+            "Evaluate a trained JiT decoder on saved EVA/DINO feature shards and "
             "compute FID against reconstructed validation images."
         )
     )
@@ -40,10 +40,10 @@ def parse_args() -> argparse.Namespace:
         help='Raw image split aligned with the evaluation feature shards. Defaults to "validation".',
     )
     parser.add_argument(
-        "--latent-dir-name",
+        "--eva-dir-name",
         type=str,
         default=None,
-        help="Override the latent feature shard directory name.",
+        help="Override the EVA feature shard directory name.",
     )
     parser.add_argument(
         "--dino-dir-name",
@@ -182,11 +182,8 @@ def select_checkpoint_key(args: argparse.Namespace, checkpoint_payload: dict) ->
 
 def build_decoder_model_from_args(checkpoint_args: argparse.Namespace) -> DecoderReconstructionModel:
     decoder = Decoder(
-        input_size=int(require_checkpoint_arg(checkpoint_args, "latent_size")),
         patch_size=int(require_checkpoint_arg(checkpoint_args, "decoder_patch_size")),
-        latent_patch_size=int(require_checkpoint_arg(checkpoint_args, "decoder_latent_patch_size")),
-        in_channels=int(require_checkpoint_arg(checkpoint_args, "latent_in_channels")),
-        bottleneck_dim=int(require_checkpoint_arg(checkpoint_args, "bottleneck_dim")),
+        eva_hidden_size=int(getattr(checkpoint_args, "eva_hidden_size", 384)),
         dino_hidden_size=int(require_checkpoint_arg(checkpoint_args, "dino_hidden_size")),
         hidden_size=int(require_checkpoint_arg(checkpoint_args, "decoder_hidden_size")),
         out_channels=int(require_checkpoint_arg(checkpoint_args, "image_out_channels")),
@@ -315,16 +312,16 @@ def main() -> None:
     checkpoint_epoch = int(checkpoint_payload.get("epoch", -1))
 
     image_size = int(require_checkpoint_arg(checkpoint_args, "decoder_output_image_size"))
-    latent_dir_name = resolve_feature_dir_name(
-        args.latent_dir_name,
-        getattr(checkpoint_args, "latent_dir_name", None),
-        f"imagenet{image_size}_latents",
+    eva_dir_name = resolve_feature_dir_name(
+        args.eva_dir_name,
+        getattr(checkpoint_args, "eva_dir_name", None),
+        "imagenet224_eva02_small_features",
         args.split,
     )
     dino_dir_name = resolve_feature_dir_name(
         args.dino_dir_name,
         getattr(checkpoint_args, "dino_dir_name", None),
-        f"imagenet{image_size}_dinov3_features",
+        "imagenet224_dinov3_features",
         args.split,
     )
 
@@ -340,19 +337,19 @@ def main() -> None:
     log_rank0(
         rank,
         "Inspecting feature shards: "
-        f"latents={latent_dir_name}, dino={dino_dir_name}, feature_root={args.feature_root}",
+        f"eva={eva_dir_name}, dino={dino_dir_name}, feature_root={args.feature_root}",
     )
 
-    latent_store = inspect_feature_shards(args.feature_root, latent_dir_name)
+    eva_store = inspect_feature_shards(args.feature_root, eva_dir_name)
     dino_store = inspect_feature_shards(args.feature_root, dino_dir_name)
     log_rank0(
         rank,
         "Loaded shard metadata: "
-        f"latents={latent_store.total_size} samples across {len(latent_store.shard_spans)} shards, "
+        f"eva={eva_store.total_size} samples across {len(eva_store.shard_spans)} shards, "
         f"dino={dino_store.total_size} samples across {len(dino_store.shard_spans)} shards.",
     )
     dataset = RamLoadedShardDataset(
-        latent_store=latent_store,
+        eva_store=eva_store,
         dino_store=dino_store,
         batch_size=batch_size,
         num_replicas=world_size,
@@ -416,13 +413,13 @@ def main() -> None:
     log_rank0(rank, f"Starting reconstruction loop for up to {target_num_images} images.")
     progress = tqdm(data_loader, total=len(data_loader), desc=f"Rank {rank}", disable=rank != 0)
     for step_idx, batch in enumerate(progress):
-        latent = batch["latent"].to(device, non_blocking=True)
+        eva = batch["eva"].to(device, non_blocking=True)
         dino = batch["dino"].to(device, non_blocking=True)
         target_image = batch["image"].to(device, non_blocking=True)
         sample_ids = batch["sample_id"].cpu().numpy().astype(np.int64, copy=False)
 
         with autocast_context(device):
-            reconstructed = model.generate(latent, dino)
+            reconstructed = model.generate(eva, dino)
 
         batch_indices = (
             step_idx * world_size * batch_size
@@ -471,7 +468,7 @@ def main() -> None:
             "num_images": target_num_images,
             "split": args.split,
             "feature_root": args.feature_root,
-            "latent_dir_name": latent_dir_name,
+            "eva_dir_name": eva_dir_name,
             "dino_dir_name": dino_dir_name,
             "image_data_path": args.image_data_path,
             "image_size": image_size,

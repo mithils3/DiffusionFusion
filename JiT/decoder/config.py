@@ -33,13 +33,13 @@ class SchedulerConfig:
 
 @dataclass(frozen=True)
 class DecoderModelConfig:
+    eva_hidden_size: int = 384
     dino_hidden_size: int = 768
     hidden_size: int = 1152
     depth: int = 12
     num_heads: int = 16
     mlp_ratio: float = 4.0
     patch_size: int = 16
-    latent_patch_size: int = 2
     output_image_size: int = 256
     noise_tau: float = 0.4
 
@@ -203,13 +203,13 @@ def _build_decoder_model_config(
     if not data:
         return defaults
     return DecoderModelConfig(
+        eva_hidden_size=int(data.get("eva_hidden_size", defaults.eva_hidden_size)),
         dino_hidden_size=int(data.get("dino_hidden_size", defaults.dino_hidden_size)),
         hidden_size=int(data.get("hidden_size", defaults.hidden_size)),
         depth=int(data.get("depth", defaults.depth)),
         num_heads=int(data.get("num_heads", defaults.num_heads)),
         mlp_ratio=float(data.get("mlp_ratio", defaults.mlp_ratio)),
         patch_size=int(data.get("patch_size", defaults.patch_size)),
-        latent_patch_size=int(data.get("latent_patch_size", defaults.latent_patch_size)),
         output_image_size=int(data.get("output_image_size", defaults.output_image_size)),
         noise_tau=float(data.get("noise_tau", defaults.noise_tau)),
     )
