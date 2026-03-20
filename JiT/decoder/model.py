@@ -8,13 +8,12 @@ from JiT.util.model_util import get_2d_sincos_pos_embed
 
 
 class Decoder(nn.Module):
-    """Transformer decoder that reconstructs an image from concatenated EVA and DINO tokens."""
+    """Transformer decoder that reconstructs an image from EVA tokens."""
 
     def __init__(
         self,
         patch_size: int,
         eva_hidden_size: int,
-        dino_hidden_size: int,
         hidden_size: int,
         out_channels: int,
         depth: int,
@@ -26,7 +25,6 @@ class Decoder(nn.Module):
     ) -> None:
         super().__init__()
         self.eva_hidden_size = eva_hidden_size
-        self.dino_hidden_size = dino_hidden_size
         self.hidden_size = hidden_size
         self.out_channels = out_channels
         self.patch_size = patch_size
@@ -47,13 +45,7 @@ class Decoder(nn.Module):
         self.eva_embedder = nn.Identity() if eva_hidden_size == hidden_size else nn.Linear(
             eva_hidden_size, hidden_size, bias=True
         )
-        self.dino_embedder = nn.Identity() if dino_hidden_size == hidden_size else nn.Linear(
-            dino_hidden_size, hidden_size, bias=True
-        )
         self.eva_pos_embed = nn.Parameter(
-            torch.zeros(1, self.num_patches, hidden_size), requires_grad=False
-        )
-        self.dino_pos_embed = nn.Parameter(
             torch.zeros(1, self.num_patches, hidden_size), requires_grad=False
         )
         self.query_tokens = nn.Parameter(
@@ -63,7 +55,6 @@ class Decoder(nn.Module):
             torch.zeros(1, self.num_patches, hidden_size)
         )
         self.eva_stream_embed = nn.Parameter(torch.zeros(1, 1, hidden_size))
-        self.dino_stream_embed = nn.Parameter(torch.zeros(1, 1, hidden_size))
         self.final_layer = DecoderFinalLayer(
             hidden_size=hidden_size,
             patch_size=patch_size,
@@ -118,19 +109,13 @@ class Decoder(nn.Module):
         pos_embed = get_2d_sincos_pos_embed(self.hidden_size, self.grid_size)
         pos_embed_tensor = torch.from_numpy(pos_embed).float().unsqueeze(0)
         self.eva_pos_embed.data.copy_(pos_embed_tensor)
-        self.dino_pos_embed.data.copy_(pos_embed_tensor)
         nn.init.normal_(self.query_tokens, std=0.02)
         nn.init.normal_(self.query_pos_embed, std=0.02)
         nn.init.normal_(self.eva_stream_embed, std=0.02)
-        nn.init.normal_(self.dino_stream_embed, std=0.02)
         if isinstance(self.eva_embedder, nn.Linear):
             we = self.eva_embedder.weight.data
             nn.init.xavier_uniform_(we.view(we.shape[0], -1))
             nn.init.constant_(self.eva_embedder.bias, 0)
-        if isinstance(self.dino_embedder, nn.Linear):
-            wd = self.dino_embedder.weight.data
-            nn.init.xavier_uniform_(wd.view(wd.shape[0], -1))
-            nn.init.constant_(self.dino_embedder.bias, 0)
 
         # Scale residual-stream projections for stability across depth.
         residual_scale = 1 / math.sqrt(2 * max(self.depth, 1))
@@ -168,29 +153,16 @@ class Decoder(nn.Module):
             )
         return features
 
-    def _build_context_tokens(
-        self,
-        eva_tokens: torch.Tensor,
-        dino_tokens: torch.Tensor,
-    ) -> torch.Tensor:
-        if eva_tokens.shape[0] != dino_tokens.shape[0]:
-            raise ValueError(
-                "EVA and DINO batch sizes must match before context concatenation, got "
-                f"{eva_tokens.shape[0]} and {dino_tokens.shape[0]}."
-            )
-
-        # With a 16x16 grid this yields 256 EVA tokens + 256 DINO tokens = 512 context tokens.
+    def _build_context_tokens(self, eva_tokens: torch.Tensor) -> torch.Tensor:
         eva_tokens = eva_tokens + self.eva_pos_embed + self.eva_stream_embed
-        dino_tokens = dino_tokens + self.dino_pos_embed + self.dino_stream_embed
-        return torch.cat([eva_tokens, dino_tokens], dim=1)
+        return eva_tokens
 
-    def forward(self, eva, dino):
+    def forward(self, eva):
         """
-        Decode a pair of aligned context streams into an output image.
+        Decode aligned EVA tokens into an output image.
 
         Args:
             eva: EVA features of shape ``[B, D, H, W]`` or EVA tokens ``[B, T, D]``.
-            dino: DINO features of shape ``[B, D, H, W]`` or DINO tokens ``[B, T, D]``.
 
         Returns:
             Reconstructed image tensor of shape ``[B, C, H, W]``.
@@ -200,25 +172,19 @@ class Decoder(nn.Module):
             expected_hidden_size=self.eva_hidden_size,
             stream_name="EVA",
         )
-        dino_tokens = self._prepare_feature_tokens(
-            dino,
-            expected_hidden_size=self.dino_hidden_size,
-            stream_name="DINO",
-        )
         eva_tokens = self.eva_embedder(eva_tokens)
-        dino_tokens = self.dino_embedder(dino_tokens)
 
         # Use one shared set of learnable query slots and broadcast it across the batch.
         x = self.query_tokens.expand(eva_tokens.shape[0], -1, -1)
         x = x + self.query_pos_embed
-        ctx_tokens = self._build_context_tokens(eva_tokens, dino_tokens)
+        ctx_tokens = self._build_context_tokens(eva_tokens)
         for block in self.blocks:
             x = block(x, ctx_tokens)
         return self.tokens_to_image(x)
 
-    def generate(self, eva, dino):
+    def generate(self, eva):
         """Inference entrypoint expected by decoder evaluation."""
-        return self.forward(eva, dino)
+        return self.forward(eva)
 
 class CrossAttention(nn.Module):
     """Self-attention over decoder queries followed by cross-attention into context."""

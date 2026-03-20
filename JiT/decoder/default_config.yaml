@@ -1,6 +1,5 @@
 decoder:
   eva_hidden_size: 384
-  dino_hidden_size: 384
   hidden_size: 512
   depth: 16
   num_heads: 16

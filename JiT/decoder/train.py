@@ -61,11 +61,11 @@ def _unwrap_model(model):
     return model.module if hasattr(model, "module") else model
 
 
-def _forward_reconstruction(model, eva: torch.Tensor, dino: torch.Tensor) -> torch.Tensor:
-    reconstructed = model(eva, dino)
+def _forward_reconstruction(model, eva: torch.Tensor) -> torch.Tensor:
+    reconstructed = model(eva)
     if not isinstance(reconstructed, torch.Tensor):
         raise TypeError(
-            "Decoder training expects model(eva, dino) to return a reconstruction tensor."
+            "Decoder training expects model(eva) to return a reconstruction tensor."
         )
     return reconstructed
 
@@ -345,13 +345,11 @@ def train_epoch(
             )
 
         eva = batch["eva"].to(device, non_blocking=True)
-        dino = batch["dino"].to(device, non_blocking=True)
         target_image = batch["image"].to(device, non_blocking=True)
-        eva_input, dino_input = eva, dino
+        eva_input = eva
         if gan_state is not None:
-            eva_input, dino_input = apply_noise_augmentation(
+            eva_input = apply_noise_augmentation(
                 eva_input,
-                dino_input,
                 gan_state.noise_tau,
             )
 
@@ -363,7 +361,6 @@ def train_epoch(
                         reconstructed_for_disc = _forward_reconstruction(
                             model,
                             eva_input,
-                            dino_input,
                         )
                 apply_r1 = gan_state.loss_config.r1_enabled_for_step(
                     gan_state.discriminator_step
@@ -382,7 +379,7 @@ def train_epoch(
 
         optimizer.zero_grad(set_to_none=True)
         with _autocast_context(device):
-            reconstructed = _forward_reconstruction(model, eva_input, dino_input)
+            reconstructed = _forward_reconstruction(model, eva_input)
 
         use_perceptual = gan_state is not None and gan_state.loss_config.perceptual_enabled(epoch)
         perceptual_module = gan_state.perceptual_loss if use_perceptual else None
@@ -514,7 +511,7 @@ def evaluate(
     model_without_ddp.eval()
     if not hasattr(model_without_ddp, "generate"):
         raise AttributeError(
-            "Decoder evaluation expects model_without_ddp.generate(eva, dino) "
+            "Decoder evaluation expects model_without_ddp.generate(eva) "
             "to return reconstructed images."
         )
     device = next(model_without_ddp.parameters()).device
@@ -584,13 +581,12 @@ def evaluate(
     with torch.no_grad():
         for step_idx, batch in enumerate(metric_logger.log_every(eval_iterable, print_freq, header, num_steps)):
             eva = batch["eva"].to(device, non_blocking=True)
-            dino = batch["dino"].to(device, non_blocking=True)
             target_image = batch["image"].to(device, non_blocking=True)
             labels = batch["y"]
             sample_ids = batch["sample_id"].cpu().numpy().astype(np.int64, copy=False)
 
             with _autocast_context(device):
-                reconstructed = model_without_ddp.generate(eva, dino)
+                reconstructed = model_without_ddp.generate(eva)
             batch_indices = (
                 step_idx * world_size * eval_batch_size
                 + local_rank * eval_batch_size
