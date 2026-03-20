@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -J JiT_decoder_r1_image_mean_no_cap
+#SBATCH -J JiT_decoder_ctxsum_256
 #SBATCH -A bgnp-dtai-gh
 #SBATCH -p ghx4
 #SBATCH --nodes=1
@@ -23,9 +23,49 @@ git pull
 IMAGE_DATA_PATH="ILSVRC/imagenet-1k"
 
 FEATURE_ROOT="/work/hdd/bgnp/msalunkhe/data/imagenet"
-OUTPUT_DIR="/work/nvme/bgnp/msalunkhe/outputs/jit_decoder_small_gan_lower_noise_r1_image_mean_no_cap"
+OUTPUT_DIR="${OUTPUT_DIR:-/work/nvme/bgnp/msalunkhe/outputs/jit_decoder_small_ctxsum_256_r1_image_mean_no_cap}"
 FID_STATS_PATH="/work/nvme/betw/msalunkhe/data/jit_in256_stats.npz"
+BATCH_SIZE="${BATCH_SIZE:-96}"
+EPOCHS="${EPOCHS:-16}"
+EVAL_FREQ="${EVAL_FREQ:-2}"
+NUM_IMAGES="${NUM_IMAGES:-10000}"
+WANDB_RUN_NAME="${WANDB_RUN_NAME:-jit_decoder_small_ctxsum_256_r1_image_mean_no_cap}"
+
+# Optional paper-inspired ablations. Leave unset to use config defaults.
+NOISE_TAU="${NOISE_TAU:-}"
+DISC_START="${DISC_START:-}"
+DISC_UPD_START="${DISC_UPD_START:-}"
+DISC_FREEZE_BACKBONE="${DISC_FREEZE_BACKBONE:-}"
+DECODER_HIDDEN_SIZE="${DECODER_HIDDEN_SIZE:-}"
+DECODER_DEPTH="${DECODER_DEPTH:-}"
 mkdir -p "${OUTPUT_DIR}"
+
+EXTRA_ARGS=()
+if [[ -n "${NOISE_TAU}" ]]; then
+  EXTRA_ARGS+=(--decoder_noise_tau "${NOISE_TAU}")
+fi
+if [[ -n "${DISC_START}" ]]; then
+  EXTRA_ARGS+=(--decoder_disc_start "${DISC_START}")
+fi
+if [[ -n "${DISC_UPD_START}" ]]; then
+  EXTRA_ARGS+=(--decoder_disc_upd_start "${DISC_UPD_START}")
+fi
+if [[ -n "${DECODER_HIDDEN_SIZE}" ]]; then
+  EXTRA_ARGS+=(--decoder_hidden_size "${DECODER_HIDDEN_SIZE}")
+fi
+if [[ -n "${DECODER_DEPTH}" ]]; then
+  EXTRA_ARGS+=(--decoder_depth "${DECODER_DEPTH}")
+fi
+if [[ -n "${DISC_FREEZE_BACKBONE}" ]]; then
+  if [[ "${DISC_FREEZE_BACKBONE}" == "1" || "${DISC_FREEZE_BACKBONE}" == "true" ]]; then
+    EXTRA_ARGS+=(--decoder_disc_freeze_backbone)
+  elif [[ "${DISC_FREEZE_BACKBONE}" == "0" || "${DISC_FREEZE_BACKBONE}" == "false" ]]; then
+    EXTRA_ARGS+=(--no_decoder_disc_freeze_backbone)
+  else
+    echo "DISC_FREEZE_BACKBONE must be one of: 1, 0, true, false" >&2
+    exit 1
+  fi
+fi
 
 OMP_NUM_THREADS=16 torchrun \
   --nproc_per_node=auto \
@@ -38,9 +78,10 @@ OMP_NUM_THREADS=16 torchrun \
   --latent_dir_name imagenet256_latents \
   --dino_dir_name imagenet256_dinov3_features \
   --output_dir "${OUTPUT_DIR}" \
-  --wandb_run_name "jit_decoder_small_gan_lower_noise_r1_image_mean_no_cap" \
+  --wandb_run_name "${WANDB_RUN_NAME}" \
   --decoder_eval_fid_stats "${FID_STATS_PATH}" \
-  --batch_size 96 \
-  --epochs 16 \
-  --eval_freq 2 \
-  --num_images 10000
+  --batch_size "${BATCH_SIZE}" \
+  --epochs "${EPOCHS}" \
+  --eval_freq "${EVAL_FREQ}" \
+  --num_images "${NUM_IMAGES}" \
+  "${EXTRA_ARGS[@]}"

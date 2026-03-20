@@ -8,7 +8,7 @@ from JiT.util.model_util import get_2d_sincos_pos_embed
 
 
 class Decoder(nn.Module):
-    """Transformer decoder that reconstructs an image from DINO and latent tokens."""
+    """Transformer decoder that reconstructs an image from fused DINO and latent tokens."""
 
     def __init__(self, input_size: int, patch_size: int, latent_patch_size: int, in_channels: int, bottleneck_dim: int, dino_hidden_size: int, hidden_size: int, out_channels: int, depth: int, attn_drop=0.0,
                  proj_drop=0.0, num_heads=8, mlp_ratio=4.0, output_image_size: int = 256) -> None:
@@ -139,7 +139,20 @@ class Decoder(nn.Module):
                 f"Expected {self.num_patches} DINO tokens to match latent patches, got {dino.shape[1]}."
             )
 
-        return self.dino_embedder(dino) + self.pos_embed
+        return self.dino_embedder(dino)
+
+    def _fuse_context_tokens(
+        self, dino_tokens: torch.Tensor, latent_tokens: torch.Tensor
+    ) -> torch.Tensor:
+        if dino_tokens.shape != latent_tokens.shape:
+            raise ValueError(
+                "Expected aligned DINO and latent token grids before fusion, got "
+                f"{tuple(dino_tokens.shape)} and {tuple(latent_tokens.shape)}."
+            )
+
+        # DINO and latent tokens already share the same spatial grid, so fuse them
+        # position-wise and add positional encoding once on the combined stream.
+        return dino_tokens + latent_tokens + self.pos_embed
 
     def forward(self, dino, latent):
         """
@@ -153,13 +166,12 @@ class Decoder(nn.Module):
             Reconstructed image tensor of shape ``[B, C, H, W]``.
         """
         latent_tokens = self.latent_tokenizer(latent)
-        latent_tokens = latent_tokens + self.pos_embed
-        dino = self._prepare_dino_tokens(dino)
+        dino_tokens = self._prepare_dino_tokens(dino)
 
         # Use one shared set of learnable query slots and broadcast it across the batch.
         x = self.query_tokens.expand(latent.shape[0], -1, -1)
         x = x + self.query_pos_embed
-        ctx_tokens = torch.cat([dino, latent_tokens], dim=1)
+        ctx_tokens = self._fuse_context_tokens(dino_tokens, latent_tokens)
         for block in self.blocks:
             x = block(x, ctx_tokens)
         return self.tokens_to_image(x)
