@@ -41,7 +41,7 @@ fi
 mkdir -p "${OUTPUT_DIR}"
 
 OMP_NUM_THREADS=16 torchrun \
-  --nproc_per_node=2 \
+  --nproc_per_node=auto \
   --nnodes=1 \
   --node_rank=0 \
   JiT/eval/eval_decoder.py \
