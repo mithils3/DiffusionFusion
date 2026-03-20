@@ -27,7 +27,6 @@ SPLIT="${SPLIT:-validation}"
 NUM_IMAGES="${NUM_IMAGES:-50000}"
 BATCH_SIZE="${BATCH_SIZE:-96}"
 FID_BATCH_SIZE="${FID_BATCH_SIZE:-256}"
-FID_DIMS="${FID_DIMS:-2048}"
 FID_NUM_WORKERS="${FID_NUM_WORKERS:-4}"
 CHECKPOINT_KEY="${CHECKPOINT_KEY:-auto}"
 
@@ -55,5 +54,4 @@ OMP_NUM_THREADS=16 torchrun \
   --num-images "${NUM_IMAGES}" \
   --checkpoint-key "${CHECKPOINT_KEY}" \
   --fid-batch-size "${FID_BATCH_SIZE}" \
-  --fid-dims "${FID_DIMS}" \
   --fid-num-workers "${FID_NUM_WORKERS}"
