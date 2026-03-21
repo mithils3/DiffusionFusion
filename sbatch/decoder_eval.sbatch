@@ -20,7 +20,7 @@ source /u/msalunkhe/.venv/bin/activate
 cd /u/msalunkhe/DiffusionFusion
 git pull
 
-CHECKPOINT="${CHECKPOINT:-/work/nvme/bgnp/msalunkhe/outputs/jit_decoder_small_gan_lower_noise_r1_norm/checkpoint-last.pth}"
+CHECKPOINT="${CHECKPOINT:-/work/nvme/bgnp/msalunkhe/outputs/jit_decoder_small_gan_lower_noise/checkpoint-last.pth}"
 FEATURE_ROOT="${FEATURE_ROOT:-/work/hdd/bgnp/msalunkhe/data/imagenet}"
 IMAGE_DATA_PATH="${IMAGE_DATA_PATH:-ILSVRC/imagenet-1k}"
 SPLIT="${SPLIT:-validation}"

@@ -25,7 +25,6 @@ from JiT.decoder.gan import (
 from JiT.decoder.losses import (
     build_decoder_loss_breakdown,
     hinge_discriminator_loss,
-    r1_gradient_penalty,
     vanilla_generator_loss,
 )
 
@@ -43,16 +42,9 @@ def _autocast_context(device: torch.device):
 @contextmanager
 def _discriminator_forward_context(
     device: torch.device,
-    *,
-    needs_second_order: bool,
 ):
     with ExitStack() as stack:
-        if needs_second_order and device.type == "cuda":
-            stack.enter_context(
-                torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.MATH)
-            )
-        else:
-            stack.enter_context(_autocast_context(device))
+        stack.enter_context(_autocast_context(device))
         yield
 
 
@@ -234,7 +226,6 @@ def _discriminator_step(
     image_mean: torch.Tensor,
     image_std: torch.Tensor,
     device: torch.device,
-    apply_r1: bool,
 ) -> dict[str, float]:
     if gan_state.loss_config.disc_loss != "hinge":
         raise NotImplementedError(
@@ -251,32 +242,10 @@ def _discriminator_step(
     real_disc_images = _apply_discriminator_augment(real_disc_images, gan_state)
     fake_disc_images = _apply_discriminator_augment(fake_disc_images, gan_state)
 
-    r1_weight = gan_state.loss_config.r1_weight if apply_r1 else 0.0
-    if r1_weight > 0.0:
-        real_disc_images = real_disc_images.float().requires_grad_(True)
-
-    with _discriminator_forward_context(
-        device,
-        needs_second_order=r1_weight > 0.0,
-    ):
+    with _discriminator_forward_context(device):
         fake_logits, real_logits = discriminator(fake_disc_images, real_disc_images)
         disc_hinge_loss = hinge_discriminator_loss(real_logits, fake_logits)
         disc_loss = disc_hinge_loss
-
-    r1_penalty_value = 0.0
-    raw_r1_penalty_value = 0.0
-    r1_loss_value = 0.0
-    if r1_weight > 0.0:
-        raw_r1_penalty = r1_gradient_penalty(real_logits.float(), real_disc_images)
-        raw_r1_penalty_value = float(raw_r1_penalty.item())
-        effective_r1_penalty = raw_r1_penalty
-        r1_max_penalty = gan_state.loss_config.r1_max_penalty
-        if r1_max_penalty is not None:
-            effective_r1_penalty = torch.clamp(effective_r1_penalty, max=r1_max_penalty)
-        r1_loss = r1_weight * 0.5 * effective_r1_penalty
-        disc_loss = disc_loss + r1_loss
-        r1_penalty_value = float(effective_r1_penalty.item())
-        r1_loss_value = float(r1_loss.item())
 
     disc_loss_value = float(disc_loss.item())
     _raise_if_not_finite(disc_loss_value, "Discriminator loss")
@@ -288,10 +257,6 @@ def _discriminator_step(
         "disc_hinge_loss": float(disc_hinge_loss.item()),
         "disc_real_logit": float(real_logits.detach().mean().item()),
         "disc_fake_logit": float(fake_logits.detach().mean().item()),
-        "r1_applied": 1.0 if r1_weight > 0.0 else 0.0,
-        "r1_loss": r1_loss_value,
-        "r1_penalty": r1_penalty_value,
-        "r1_penalty_raw": raw_r1_penalty_value,
     }
     return metrics
 
@@ -380,9 +345,6 @@ def train_epoch(
                             latent_input,
                             dino_input,
                         )
-                apply_r1 = gan_state.loss_config.r1_enabled_for_step(
-                    gan_state.discriminator_step
-                )
                 disc_metrics = _discriminator_step(
                     gan_state=gan_state,
                     real_images=target_image,
@@ -390,9 +352,7 @@ def train_epoch(
                     image_mean=image_mean,
                     image_std=image_std,
                     device=device,
-                    apply_r1=apply_r1,
                 )
-                gan_state.discriminator_step += 1
                 step_metrics.update(disc_metrics)
 
         optimizer.zero_grad(set_to_none=True)
@@ -484,10 +444,6 @@ def train_epoch(
             "disc_hinge_loss",
             "disc_real_logit",
             "disc_fake_logit",
-            "r1_applied",
-            "r1_loss",
-            "r1_penalty",
-            "r1_penalty_raw",
         ):
             if key in step_metrics:
                 metric_logger.update(**{key: step_metrics[key]})

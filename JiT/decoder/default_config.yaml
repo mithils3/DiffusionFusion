@@ -58,6 +58,3 @@ gan:
     lpips_start: 0
     max_d_weight: 5.0
     disc_updates: 1
-    r1_weight: 10.0
-    r1_interval: 16
-    r1_max_penalty: 1.0

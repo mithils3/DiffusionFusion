@@ -93,20 +93,12 @@ class DecoderLossConfig:
     lpips_start: int = 0
     max_d_weight: float = 5.0
     disc_updates: int = 1
-    r1_weight: float = 10.0
-    r1_interval: int = 16
-    r1_max_penalty: float | None = 1.0
 
     def perceptual_enabled(self, epoch: int) -> bool:
         return epoch >= self.lpips_start
 
     def discriminator_updates_enabled(self, epoch: int) -> bool:
         return epoch >= self.disc_upd_start
-
-    def r1_enabled_for_step(self, discriminator_step: int) -> bool:
-        if self.r1_weight <= 0.0 or self.r1_interval <= 0:
-            return False
-        return discriminator_step % self.r1_interval == 0
 
     def adversarial_enabled(self, epoch: int) -> bool:
         return epoch >= self.disc_start

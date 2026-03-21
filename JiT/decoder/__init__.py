@@ -31,7 +31,6 @@ from .losses import (
     hinge_discriminator_loss,
     l1_reconstruction_loss,
     mse_reconstruction_loss,
-    r1_gradient_penalty,
     vanilla_generator_loss,
     zero_loss_like,
 )
@@ -66,7 +65,6 @@ __all__ = [
     "l1_reconstruction_loss",
     "load_decoder_plan_config",
     "mse_reconstruction_loss",
-    "r1_gradient_penalty",
     "set_requires_grad",
     "vanilla_generator_loss",
     "zero_loss_like",

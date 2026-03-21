@@ -23,7 +23,7 @@ git pull
 IMAGE_DATA_PATH="ILSVRC/imagenet-1k"
 
 FEATURE_ROOT="/work/hdd/bgnp/msalunkhe/data/imagenet"
-OUTPUT_DIR="${OUTPUT_DIR:-/work/nvme/bgnp/msalunkhe/outputs/jit_decoder_small_gan_lower_noise_r1_norm}"
+OUTPUT_DIR="${OUTPUT_DIR:-/work/nvme/bgnp/msalunkhe/outputs/jit_decoder_small_gan_lower_noise}"
 FID_STATS_PATH="${FID_STATS_PATH:-/work/nvme/betw/msalunkhe/data/jit_in256_stats.npz}"
 LATENT_DIR_NAME="${LATENT_DIR_NAME:-imagenet256_latents}"
 DINO_DIR_NAME="${DINO_DIR_NAME:-imagenet256_dinov3_features}"
