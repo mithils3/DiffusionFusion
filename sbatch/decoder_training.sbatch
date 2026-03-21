@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -J JiT_decoder_dino_only
+#SBATCH -J JiT_decoder_latent_dino
 #SBATCH -A bgnp-dtai-gh
 #SBATCH -p ghx4
 #SBATCH --nodes=1
@@ -23,12 +23,15 @@ git pull
 IMAGE_DATA_PATH="ILSVRC/imagenet-1k"
 
 FEATURE_ROOT="/work/hdd/bgnp/msalunkhe/data/imagenet"
-OUTPUT_DIR="${OUTPUT_DIR:-/work/nvme/bgnp/msalunkhe/outputs/jit_decoder_dino_only}"
+OUTPUT_DIR="${OUTPUT_DIR:-/work/nvme/bgnp/msalunkhe/outputs/jit_decoder_small_gan_lower_noise_r1_norm}"
+FID_STATS_PATH="${FID_STATS_PATH:-/work/nvme/betw/msalunkhe/data/jit_in256_stats.npz}"
+LATENT_DIR_NAME="${LATENT_DIR_NAME:-imagenet256_latents}"
+DINO_DIR_NAME="${DINO_DIR_NAME:-imagenet256_dinov3_features}"
 BATCH_SIZE="${BATCH_SIZE:-96}"
-EPOCHS="${EPOCHS:-16}"
+EPOCHS="${EPOCHS:-12}"
 EVAL_FREQ="${EVAL_FREQ:-2}"
 NUM_IMAGES="${NUM_IMAGES:-10000}"
-WANDB_RUN_NAME="${WANDB_RUN_NAME:-jit_decoder_dino_only}"
+WANDB_RUN_NAME="${WANDB_RUN_NAME:-jit_decoder_latent_dino}"
 
 # Optional paper-inspired ablations. Leave unset to use config defaults.
 NOISE_TAU="${NOISE_TAU:-}"
@@ -74,8 +77,10 @@ OMP_NUM_THREADS=16 torchrun \
   --config decoder/default_config.yaml \
   --data_path "${FEATURE_ROOT}" \
   --image_data_path "${IMAGE_DATA_PATH}" \
-  --dino_dir_name imagenet224_dinov3_features \
+  --latent_dir_name "${LATENT_DIR_NAME}" \
+  --dino_dir_name "${DINO_DIR_NAME}" \
   --output_dir "${OUTPUT_DIR}" \
+  --decoder_eval_fid_stats "${FID_STATS_PATH}" \
   --wandb_run_name "${WANDB_RUN_NAME}" \
   --batch_size "${BATCH_SIZE}" \
   --epochs "${EPOCHS}" \

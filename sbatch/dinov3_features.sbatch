@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -J DINOv2_features
+#SBATCH -J DINO_features
 #SBATCH -A bgnp-dtai-gh
 #SBATCH -p ghx4
 #SBATCH --nodes=1
@@ -23,11 +23,13 @@ git pull
 IMAGENET_PATH="ILSVRC/imagenet-1k"
 OUTPUT_DIR="/work/hdd/bgnp/msalunkhe/data/imagenet"
 SPLIT="${SPLIT:-train}"
+HF_DATASET_NAME="${HF_DATASET_NAME:-imagenet256_dinov3_features}"
 # Avoid thread explosion across DDP ranks + DataLoader workers.
 torchrun --nproc_per_node=auto --nnodes=1 --node_rank=0 \
 feature_extraction/dinov3.py \
 --data-path ${IMAGENET_PATH}  \
 --features-path ${OUTPUT_DIR} \
 --split "${SPLIT}" \
---image-size 224 \
+--image-size 256 \
+--hf-dataset-name "${HF_DATASET_NAME}" \
 --num-workers 4

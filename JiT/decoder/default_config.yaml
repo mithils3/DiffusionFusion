@@ -1,11 +1,12 @@
 decoder:
-  dino_hidden_size: 384
+  dino_hidden_size: 768
   hidden_size: 1536
   depth: 12
   num_heads: 24
   mlp_ratio: 4.0
-  patch_size: 14
-  output_image_size: 224
+  patch_size: 16
+  latent_patch_size: 2
+  output_image_size: 256
   noise_tau: 0.2
 
 training:
@@ -26,6 +27,7 @@ gan:
     arch:
       backbone_model_name: timm/vit_small_patch8_224.dino
       dino_ckpt_path: null
+      input_size: 224
       freeze_backbone: true
       ks: 9
       norm_type: bn
@@ -35,20 +37,27 @@ gan:
       norm_eps: 1.0e-6
     optimizer:
       lr: 2.0e-4
-      betas: [0.9, 0.95]
+      betas: [0.5, 0.9]
       weight_decay: 0.0
     augment:
-      prob: 1.0
+      prob: 0.5
       cutout: 0.0
+      brightness: 0.2
+      contrast: 0.2
+      saturation: 0.2
+      horizontal_flip: true
   loss:
     disc_loss: hinge
     gen_loss: vanilla
-    disc_weight: 0.75
+    disc_weight: 1.5
     perceptual_weight: 1.0
     adaptive_weight: true
-    disc_start: 8
-    disc_upd_start: 6
-    adversarial_warmup_epochs: 0.0
+    disc_start: 6
+    disc_upd_start: 4
+    adversarial_warmup_epochs: 2.0
     lpips_start: 0
-    max_d_weight: 10000.0
+    max_d_weight: 5.0
     disc_updates: 1
+    r1_weight: 10.0
+    r1_interval: 16
+    r1_max_penalty: 1.0

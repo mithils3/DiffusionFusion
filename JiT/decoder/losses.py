@@ -4,14 +4,39 @@ import torch
 from torch import nn
 
 
+def l1_reconstruction_loss(reconstructed: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    return torch.mean(torch.abs(reconstructed - target))
+
+
+def mse_reconstruction_loss(reconstructed: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    return torch.mean((reconstructed - target) ** 2)
+
+
 def hinge_discriminator_loss(real_logits: torch.Tensor, fake_logits: torch.Tensor) -> torch.Tensor:
     real_loss = torch.relu(1.0 - real_logits).mean()
     fake_loss = torch.relu(1.0 + fake_logits).mean()
-    return 0.5 * (real_loss + fake_loss)
+    return real_loss + fake_loss
+
+
+def r1_gradient_penalty(
+    real_logits: torch.Tensor,
+    real_images: torch.Tensor,
+) -> torch.Tensor:
+    """R1 gradient penalty: penalize squared gradient norm on real images."""
+    (grad_real,) = torch.autograd.grad(
+        outputs=real_logits.sum(),
+        inputs=real_images,
+        create_graph=True,
+    )
+    return grad_real.pow(2).reshape(grad_real.shape[0], -1).sum(1).mean()
 
 
 def vanilla_generator_loss(fake_logits: torch.Tensor) -> torch.Tensor:
     return -fake_logits.mean()
+
+
+def zero_loss_like(reference: torch.Tensor) -> torch.Tensor:
+    return reference.new_zeros(())
 
 
 def _prepare_lpips_input(
@@ -76,10 +101,10 @@ def build_decoder_loss_breakdown(
     use_perceptual: bool = True,
     use_adversarial: bool = True,
 ) -> DecoderLossBreakdown:
-    reconstruction = torch.mean(torch.abs(reconstructed - target))
-    mse = torch.mean((reconstructed - target) ** 2)
-    perceptual = reconstruction.new_zeros(())
-    adversarial = reconstruction.new_zeros(())
+    reconstruction = l1_reconstruction_loss(reconstructed, target)
+    mse = mse_reconstruction_loss(reconstructed, target)
+    perceptual = zero_loss_like(reconstruction)
+    adversarial = zero_loss_like(reconstruction)
 
     if use_perceptual and perceptual_loss_module is not None:
         perceptual = perceptual_loss_module(

@@ -25,6 +25,7 @@ from JiT.decoder.gan import (
 from JiT.decoder.losses import (
     build_decoder_loss_breakdown,
     hinge_discriminator_loss,
+    r1_gradient_penalty,
     vanilla_generator_loss,
 )
 
@@ -42,9 +43,16 @@ def _autocast_context(device: torch.device):
 @contextmanager
 def _discriminator_forward_context(
     device: torch.device,
+    *,
+    needs_second_order: bool,
 ):
     with ExitStack() as stack:
-        stack.enter_context(_autocast_context(device))
+        if needs_second_order and device.type == "cuda":
+            stack.enter_context(
+                torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.MATH)
+            )
+        else:
+            stack.enter_context(_autocast_context(device))
         yield
 
 
@@ -52,11 +60,11 @@ def _unwrap_model(model):
     return model.module if hasattr(model, "module") else model
 
 
-def _forward_reconstruction(model, dino: torch.Tensor) -> torch.Tensor:
-    reconstructed = model(dino)
+def _forward_reconstruction(model, latent: torch.Tensor, dino: torch.Tensor) -> torch.Tensor:
+    reconstructed = model(latent, dino)
     if not isinstance(reconstructed, torch.Tensor):
         raise TypeError(
-            "Decoder training expects model(dino) to return a reconstruction tensor."
+            "Decoder training expects model(latent, dino) to return a reconstruction tensor."
         )
     return reconstructed
 
@@ -171,6 +179,16 @@ def _require_pytorch_fid():
     return calculate_fid_given_paths
 
 
+def _require_torch_fidelity():
+    try:
+        import torch_fidelity
+    except ImportError as exc:
+        raise ImportError(
+            "torch_fidelity is required for decoder evaluation metrics. Install it to run decoder FID/IS."
+        ) from exc
+    return torch_fidelity
+
+
 def _save_uint8_pngs(images: np.ndarray, sample_ids: np.ndarray, output_dir: Path) -> None:
     for image_array, sample_id in zip(images, sample_ids.tolist(), strict=True):
         Image.fromarray(image_array).save(
@@ -202,6 +220,8 @@ def _run_pytorch_fid(
 
 
 def _apply_discriminator_augment(images: torch.Tensor, gan_state: DecoderGanTrainingState) -> torch.Tensor:
+    if gan_state.discriminator_augment is None:
+        return images
     gan_state.discriminator_augment.train(True)
     return gan_state.discriminator_augment(images)
 
@@ -214,6 +234,7 @@ def _discriminator_step(
     image_mean: torch.Tensor,
     image_std: torch.Tensor,
     device: torch.device,
+    apply_r1: bool,
 ) -> dict[str, float]:
     if gan_state.loss_config.disc_loss != "hinge":
         raise NotImplementedError(
@@ -230,10 +251,32 @@ def _discriminator_step(
     real_disc_images = _apply_discriminator_augment(real_disc_images, gan_state)
     fake_disc_images = _apply_discriminator_augment(fake_disc_images, gan_state)
 
-    with _discriminator_forward_context(device):
+    r1_weight = gan_state.loss_config.r1_weight if apply_r1 else 0.0
+    if r1_weight > 0.0:
+        real_disc_images = real_disc_images.float().requires_grad_(True)
+
+    with _discriminator_forward_context(
+        device,
+        needs_second_order=r1_weight > 0.0,
+    ):
         fake_logits, real_logits = discriminator(fake_disc_images, real_disc_images)
         disc_hinge_loss = hinge_discriminator_loss(real_logits, fake_logits)
         disc_loss = disc_hinge_loss
+
+    r1_penalty_value = 0.0
+    raw_r1_penalty_value = 0.0
+    r1_loss_value = 0.0
+    if r1_weight > 0.0:
+        raw_r1_penalty = r1_gradient_penalty(real_logits.float(), real_disc_images)
+        raw_r1_penalty_value = float(raw_r1_penalty.item())
+        effective_r1_penalty = raw_r1_penalty
+        r1_max_penalty = gan_state.loss_config.r1_max_penalty
+        if r1_max_penalty is not None:
+            effective_r1_penalty = torch.clamp(effective_r1_penalty, max=r1_max_penalty)
+        r1_loss = r1_weight * 0.5 * effective_r1_penalty
+        disc_loss = disc_loss + r1_loss
+        r1_penalty_value = float(effective_r1_penalty.item())
+        r1_loss_value = float(r1_loss.item())
 
     disc_loss_value = float(disc_loss.item())
     _raise_if_not_finite(disc_loss_value, "Discriminator loss")
@@ -245,6 +288,10 @@ def _discriminator_step(
         "disc_hinge_loss": float(disc_hinge_loss.item()),
         "disc_real_logit": float(real_logits.detach().mean().item()),
         "disc_fake_logit": float(fake_logits.detach().mean().item()),
+        "r1_applied": 1.0 if r1_weight > 0.0 else 0.0,
+        "r1_loss": r1_loss_value,
+        "r1_penalty": r1_penalty_value,
+        "r1_penalty_raw": raw_r1_penalty_value,
     }
     return metrics
 
@@ -312,11 +359,13 @@ def train_epoch(
                 lr_schedule=gan_state.disc_lr_schedule,
             )
 
+        latent = batch["latent"].to(device, non_blocking=True)
         dino = batch["dino"].to(device, non_blocking=True)
         target_image = batch["image"].to(device, non_blocking=True)
-        dino_input = dino
+        latent_input, dino_input = latent, dino
         if gan_state is not None:
-            dino_input = apply_noise_augmentation(
+            latent_input, dino_input = apply_noise_augmentation(
+                latent_input,
                 dino_input,
                 gan_state.noise_tau,
             )
@@ -328,8 +377,12 @@ def train_epoch(
                     with _autocast_context(device):
                         reconstructed_for_disc = _forward_reconstruction(
                             model,
+                            latent_input,
                             dino_input,
                         )
+                apply_r1 = gan_state.loss_config.r1_enabled_for_step(
+                    gan_state.discriminator_step
+                )
                 disc_metrics = _discriminator_step(
                     gan_state=gan_state,
                     real_images=target_image,
@@ -337,12 +390,14 @@ def train_epoch(
                     image_mean=image_mean,
                     image_std=image_std,
                     device=device,
+                    apply_r1=apply_r1,
                 )
+                gan_state.discriminator_step += 1
                 step_metrics.update(disc_metrics)
 
         optimizer.zero_grad(set_to_none=True)
         with _autocast_context(device):
-            reconstructed = _forward_reconstruction(model, dino_input)
+            reconstructed = _forward_reconstruction(model, latent_input, dino_input)
 
         use_perceptual = gan_state is not None and gan_state.loss_config.perceptual_enabled(epoch)
         perceptual_module = gan_state.perceptual_loss if use_perceptual else None
@@ -429,6 +484,10 @@ def train_epoch(
             "disc_hinge_loss",
             "disc_real_logit",
             "disc_fake_logit",
+            "r1_applied",
+            "r1_loss",
+            "r1_penalty",
+            "r1_penalty_raw",
         ):
             if key in step_metrics:
                 metric_logger.update(**{key: step_metrics[key]})
@@ -470,7 +529,7 @@ def evaluate(
     model_without_ddp.eval()
     if not hasattr(model_without_ddp, "generate"):
         raise AttributeError(
-            "Decoder evaluation expects model_without_ddp.generate(eva) "
+            "Decoder evaluation expects model_without_ddp.generate(latent, dino) "
             "to return reconstructed images."
         )
     device = next(model_without_ddp.parameters()).device
@@ -480,15 +539,13 @@ def evaluate(
     requested_num_images = int(args.num_images or 0)
     total_available_steps = len(data_loader)
     total_available_images = total_available_steps * eval_batch_size * world_size
-    raw_dataset_size = data_loader.dataset.image_store.dataset_size
-    max_evaluable_images = min(total_available_images, raw_dataset_size)
-    target_num_images = requested_num_images if requested_num_images > 0 else max_evaluable_images
-    if target_num_images > max_evaluable_images and misc.is_main_process():
+    target_num_images = requested_num_images if requested_num_images > 0 else total_available_images
+    if target_num_images > total_available_images and misc.is_main_process():
         print(
             f"Requested {target_num_images} decoder eval images, but only "
-            f"{max_evaluable_images} unique images are available. Evaluating on the available images."
+            f"{total_available_images} are available. Evaluating on the available images."
         )
-    target_num_images = min(target_num_images, max_evaluable_images)
+    target_num_images = min(target_num_images, total_available_images)
     if target_num_images <= 0:
         print("No decoder eval images available; skipping evaluation.")
         return
@@ -499,7 +556,6 @@ def evaluate(
     )
     eval_image_interval = max(1, args.wandb_eval_image_interval)
     wandb_table = None
-    wandb_module = None
     if misc.is_main_process() and wandb_run is not None:
         wandb_module = _require_wandb()
         wandb_table = wandb_module.Table(
@@ -513,67 +569,57 @@ def evaluate(
             ]
         )
 
-    eval_root = Path(args.output_dir if args.output_dir else ".").expanduser().resolve()
-    eval_output_dir = eval_root / f"decoder-eval-epoch{int(epoch):04d}-images{target_num_images}"
-    subset_tag = f"{getattr(args, 'image_data_split', 'train')}_{target_num_images}"
-    reference_dir = eval_output_dir / f"reference_images_{subset_tag}"
-    recon_dir = eval_output_dir / f"reconstructions_{subset_tag}"
-    print(f"Save references to: {reference_dir}")
-    print(f"Save reconstructions to: {recon_dir}")
+    eval_root = args.output_dir if args.output_dir else "."
+    eval_output_dir = os.path.join(
+        eval_root,
+        f"decoder-eval-reconstructions-epoch{int(epoch):04d}-images{target_num_images}",
+    )
+    print("Save to:", eval_output_dir)
     if misc.is_main_process():
-        if eval_output_dir.is_dir():
+        if os.path.isdir(eval_output_dir):
             shutil.rmtree(eval_output_dir)
-        reference_dir.mkdir(parents=True, exist_ok=True)
-        recon_dir.mkdir(parents=True, exist_ok=True)
+        os.makedirs(eval_output_dir, exist_ok=True)
     _dist_barrier()
 
     image_mean, image_std = _extract_image_normalization(data_loader)
     metric_logger = misc.MetricLogger(delimiter="  ")
-    metric_logger.add_meter("mse", misc.SmoothedValue(
-        window_size=1, fmt="{value:.6f}"))
+    metric_logger.add_meter("mse", misc.SmoothedValue(window_size=1, fmt="{value:.6f}"))
     header = "Eval: [{}]".format(epoch)
     print_freq = 20
 
     eval_iterable = islice(data_loader, num_steps)
-    local_mse_sum = 0.0
-    local_mse_count = 0
+    saved_images_local = 0
     with torch.no_grad():
         for step_idx, batch in enumerate(metric_logger.log_every(eval_iterable, print_freq, header, num_steps)):
+            latent = batch["latent"].to(device, non_blocking=True)
             dino = batch["dino"].to(device, non_blocking=True)
             target_image = batch["image"].to(device, non_blocking=True)
             labels = batch["y"]
-            sample_ids = batch["sample_id"].cpu().numpy().astype(np.int64, copy=False)
+            sample_ids = batch["sample_id"]
 
             with _autocast_context(device):
-                reconstructed = model_without_ddp.generate(dino)
-            batch_indices = (
-                step_idx * world_size * eval_batch_size
-                + local_rank * eval_batch_size
-                + np.arange(reconstructed.shape[0], dtype=np.int64)
-            )
-            keep_mask = batch_indices < target_num_images
-            if not np.any(keep_mask):
-                break
+                reconstructed = model_without_ddp.generate(latent, dino)
+            batch_mse = torch.mean((reconstructed.float() - target_image.float()) ** 2)
+            metric_logger.update(mse=batch_mse.item())
 
-            keep_tensor = torch.as_tensor(keep_mask, device=reconstructed.device)
-            per_image_mse = (reconstructed.float() - target_image.float()).square().flatten(1).mean(dim=1)
-            local_mse_sum += float(per_image_mse[keep_tensor].sum().item())
-            local_mse_count += int(keep_mask.sum())
-            metric_logger.update(mse=float(per_image_mse[keep_tensor].mean().item()))
+            reconstructed_uint8 = _images_to_uint8(reconstructed, image_mean, image_std)
+            target_uint8 = _images_to_uint8(target_image, image_mean, image_std)
 
-            reconstructed_uint8 = _images_to_uint8(reconstructed, image_mean, image_std)[keep_mask]
-            target_uint8 = _images_to_uint8(target_image, image_mean, image_std)[keep_mask]
-            kept_sample_ids = sample_ids[keep_mask]
-            _save_uint8_pngs(target_uint8, kept_sample_ids, reference_dir)
-            _save_uint8_pngs(reconstructed_uint8, kept_sample_ids, recon_dir)
+            for sample_idx, reconstructed_image in enumerate(reconstructed_uint8):
+                global_index = (
+                    step_idx * world_size * eval_batch_size
+                    + local_rank * eval_batch_size
+                    + sample_idx
+                )
+                if global_index >= target_num_images:
+                    continue
 
-            if wandb_table is not None:
-                kept_positions = np.flatnonzero(keep_mask)
-                kept_global_indices = batch_indices[keep_mask]
-                for kept_offset, sample_idx in enumerate(kept_positions.tolist()):
-                    global_index = int(kept_global_indices[kept_offset])
-                    if global_index % eval_image_interval != 0:
-                        continue
+                Image.fromarray(reconstructed_image).save(
+                    os.path.join(eval_output_dir, f"{str(global_index).zfill(5)}.png")
+                )
+                saved_images_local += 1
+
+                if wandb_table is not None and global_index % eval_image_interval == 0:
                     class_id = int(labels[sample_idx])
                     sample_id = int(sample_ids[sample_idx])
                     wandb_table.add_data(
@@ -582,31 +628,28 @@ def evaluate(
                         sample_id,
                         class_id,
                         wandb_module.Image(
-                            target_uint8[kept_offset],
+                            target_uint8[sample_idx],
                             caption=f"target class={class_id}, sample_id={sample_id}",
                         ),
                         wandb_module.Image(
-                            reconstructed_uint8[kept_offset],
+                            reconstructed_image,
                             caption=f"recon class={class_id}, sample_id={sample_id}",
                         ),
                     )
 
     _dist_barrier()
-
-    mse_stats = torch.tensor(
-        [local_mse_sum, float(local_mse_count)],
-        dtype=torch.float64,
-        device=device,
-    )
-    if misc.is_dist_avail_and_initialized():
-        torch.distributed.all_reduce(mse_stats)
     metric_logger.synchronize_between_processes()
-    recon_mse = float(mse_stats[0].item() / max(mse_stats[1].item(), 1.0))
-    saved_images_total = int(mse_stats[1].item())
+    recon_mse = metric_logger.meters["mse"].global_avg
+
+    saved_images_total = saved_images_local
+    if misc.is_dist_avail_and_initialized():
+        saved_images_tensor = torch.tensor(saved_images_local, device=device)
+        torch.distributed.all_reduce(saved_images_tensor)
+        saved_images_total = int(saved_images_tensor.item())
 
     if misc.is_main_process():
         print(
-            f"Saved {saved_images_total} decoder eval image pairs. "
+            f"Saved {saved_images_total} decoder eval reconstructions. "
             f"Mean reconstruction MSE: {recon_mse:.6f}"
         )
 
@@ -619,53 +662,69 @@ def evaluate(
     if wandb_table is not None and len(wandb_table.data) > 0:
         log_payload["eval/samples{}".format(postfix)] = wandb_table
 
-    distribution_metrics_requested = bool(args.decoder_eval_metrics)
-    metrics_done_path = eval_root / f".decoder_eval_metrics_done_epoch_{int(epoch):05d}"
-    if distribution_metrics_requested and misc.is_main_process() and metrics_done_path.exists():
-        metrics_done_path.unlink()
+    reference_dir = args.decoder_eval_reference_dir
+    fid_statistics_file = args.decoder_eval_fid_stats
+    if reference_dir and fid_statistics_file:
+        raise ValueError(
+            "Specify only one decoder eval reference source: "
+            "--decoder_eval_reference_dir or --decoder_eval_fid_stats."
+        )
+    distribution_metrics_requested = args.decoder_eval_metrics and bool(
+        reference_dir or fid_statistics_file
+    )
+    metrics_done_path = os.path.join(
+        eval_root,
+        f".decoder_eval_metrics_done_epoch_{int(epoch):05d}",
+    )
+    if distribution_metrics_requested and misc.is_main_process() and os.path.exists(metrics_done_path):
+        os.remove(metrics_done_path)
     if distribution_metrics_requested:
         _dist_barrier()
 
     if distribution_metrics_requested and misc.is_main_process():
-        fid = _run_pytorch_fid(
-            reference_dir=reference_dir,
-            recon_dir=recon_dir,
-            device=device,
-            batch_size=int(args.decoder_eval_fid_batch_size),
-            dims=int(args.decoder_eval_fid_dims),
-            num_workers=int(args.decoder_eval_fid_num_workers),
+        torch_fidelity = _require_torch_fidelity()
+        if reference_dir and not os.path.isdir(reference_dir):
+            raise FileNotFoundError(
+                f"Decoder eval reference directory not found: {reference_dir}"
+            )
+        if fid_statistics_file and not os.path.isfile(fid_statistics_file):
+            raise FileNotFoundError(
+                f"Decoder eval FID statistics file not found: {fid_statistics_file}"
+            )
+
+        metrics_kwargs = dict(
+            input1=eval_output_dir,
+            cuda=device.type == "cuda",
+            isc=True,
+            fid=True,
+            kid=False,
+            prc=False,
+            verbose=True,
         )
+        if reference_dir:
+            metrics_kwargs["input2"] = reference_dir
+        else:
+            metrics_kwargs["input2"] = None
+            metrics_kwargs["fid_statistics_file"] = fid_statistics_file
+        metrics_dict = torch_fidelity.calculate_metrics(**metrics_kwargs)
+        fid = metrics_dict["frechet_inception_distance"]
+        inception_score = metrics_dict["inception_score_mean"]
         if log_writer is not None:
             log_writer.add_scalar("fid{}".format(postfix), fid, epoch)
+            log_writer.add_scalar("is{}".format(postfix), inception_score, epoch)
         log_payload["eval/fid{}".format(postfix)] = fid
-        metrics_summary = {
-            "epoch": int(epoch),
-            "split": getattr(args, "image_data_split", "train"),
-            "num_images": int(target_num_images),
-            "recon_mse": recon_mse,
-            "fid": fid,
-            "image_size": int(args.decoder_output_image_size),
-            "reference_dir": str(reference_dir),
-            "reconstructions_dir": str(recon_dir),
-            "fid_batch_size": int(args.decoder_eval_fid_batch_size),
-            "fid_dims": int(args.decoder_eval_fid_dims),
-            "fid_num_workers": int(args.decoder_eval_fid_num_workers),
-        }
-        (eval_output_dir / "metrics.json").write_text(
-            json.dumps(metrics_summary, indent=2) + "\n",
-            encoding="utf-8",
-        )
+        log_payload["eval/is{}".format(postfix)] = inception_score
         print(
-            "Decoder eval metrics | Recon MSE: {:.6f}, FID: {:.4f}".format(recon_mse, fid)
+            "Decoder eval metrics | Recon MSE: {:.6f}, FID: {:.4f}, Inception Score: {:.4f}".format(
+                recon_mse, fid, inception_score
+            )
         )
-        metrics_done_path.write_text(
-            json.dumps(metrics_summary) + "\n",
-            encoding="utf-8",
-        )
+        with open(metrics_done_path, "w", encoding="utf-8") as handle:
+            handle.write(f"{recon_mse},{fid},{inception_score}\n")
     elif distribution_metrics_requested:
         wait_start = time.time()
         wait_timeout = float(args.dist_timeout_sec)
-        while not metrics_done_path.exists():
+        while not os.path.exists(metrics_done_path):
             if time.time() - wait_start > wait_timeout:
                 raise RuntimeError(
                     f"Timed out waiting for decoder eval metrics sync file: {metrics_done_path}"
@@ -673,6 +732,10 @@ def evaluate(
             time.sleep(1.0)
     elif misc.is_main_process():
         print("Decoder eval metrics | Recon MSE: {:.6f}".format(recon_mse))
+        if args.decoder_eval_metrics:
+            print(
+                "Skipping FID/IS because no decoder eval reference directory or FID stats file was provided."
+            )
 
     if wandb_run is not None:
         if wandb_step is None:
@@ -681,5 +744,8 @@ def evaluate(
             wandb_run.log(log_payload, step=wandb_step)
 
     _dist_barrier()
-    if misc.is_main_process() and distribution_metrics_requested and metrics_done_path.exists():
-        metrics_done_path.unlink()
+    if misc.is_main_process():
+        if os.path.isdir(eval_output_dir):
+            shutil.rmtree(eval_output_dir)
+        if distribution_metrics_requested and os.path.exists(metrics_done_path):
+            os.remove(metrics_done_path)

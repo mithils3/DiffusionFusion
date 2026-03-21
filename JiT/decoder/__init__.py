@@ -29,9 +29,13 @@ from .losses import (
     LPIPSLoss,
     build_decoder_loss_breakdown,
     hinge_discriminator_loss,
+    l1_reconstruction_loss,
+    mse_reconstruction_loss,
+    r1_gradient_penalty,
     vanilla_generator_loss,
+    zero_loss_like,
 )
-from .model import Decoder
+from .model import Decoder, DecoderReconstructionModel, Small
 
 __all__ = [
     "Decoder",
@@ -41,6 +45,7 @@ __all__ = [
     "DecoderLossConfig",
     "DecoderModelConfig",
     "DecoderPlanConfig",
+    "DecoderReconstructionModel",
     "DecoderTrainingConfig",
     "DinoPatchDiscriminator",
     "DiscriminatorArchConfig",
@@ -50,6 +55,7 @@ __all__ = [
     "LPIPSLoss",
     "OptimizerConfig",
     "SchedulerConfig",
+    "Small",
     "apply_noise_augmentation",
     "build_decoder_gan_training_state",
     "calculate_adaptive_weight",
@@ -57,7 +63,11 @@ __all__ = [
     "get_decoder_last_layer",
     "hinge_discriminator_loss",
     "images_to_minus_one_to_one",
+    "l1_reconstruction_loss",
     "load_decoder_plan_config",
+    "mse_reconstruction_loss",
+    "r1_gradient_penalty",
     "set_requires_grad",
     "vanilla_generator_loss",
+    "zero_loss_like",
 ]

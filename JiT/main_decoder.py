@@ -11,7 +11,7 @@ import torch.backends.cudnn as cudnn
 from torch.utils.tensorboard import SummaryWriter
 
 import JiT.util.misc as misc
-from JiT.decoder import Decoder, load_decoder_plan_config
+from JiT.decoder import Decoder, DecoderReconstructionModel, load_decoder_plan_config
 from JiT.decoder.dataset import RamLoadedShardDataset, inspect_feature_shards
 from JiT.decoder.train import evaluate, train_epoch
 
@@ -26,6 +26,7 @@ torch.backends.cudnn.allow_tf32 = True
 torch.backends.cudnn.benchmark = True
 
 _DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "decoder" / "default_config.yaml"
+_DEFAULT_FID_STATS_PATH = "/work/nvme/betw/msalunkhe/data/jit_in256_stats.npz"
 
 
 @torch.no_grad()
@@ -94,8 +95,11 @@ def get_args_parser() -> argparse.ArgumentParser:
     )
 
     # decoder architecture
+    parser.add_argument("--latent_size", default=32, type=int)
     parser.add_argument("--dino_hidden_size", default=decoder_defaults.dino_hidden_size, type=int)
+    parser.add_argument("--latent_in_channels", default=4, type=int)
     parser.add_argument("--image_out_channels", default=3, type=int)
+    parser.add_argument("--bottleneck_dim", default=128, type=int)
     parser.add_argument("--attn_dropout", default=0.0, type=float)
     parser.add_argument("--proj_dropout", default=0.0, type=float)
     parser.add_argument("--decoder_hidden_size", default=decoder_defaults.hidden_size, type=int)
@@ -103,6 +107,11 @@ def get_args_parser() -> argparse.ArgumentParser:
     parser.add_argument("--decoder_num_heads", default=decoder_defaults.num_heads, type=int)
     parser.add_argument("--decoder_mlp_ratio", default=decoder_defaults.mlp_ratio, type=float)
     parser.add_argument("--decoder_patch_size", default=decoder_defaults.patch_size, type=int)
+    parser.add_argument(
+        "--decoder_latent_patch_size",
+        default=decoder_defaults.latent_patch_size,
+        type=int,
+    )
     parser.add_argument(
         "--decoder_output_image_size",
         default=decoder_defaults.output_image_size,
@@ -175,6 +184,11 @@ def get_args_parser() -> argparse.ArgumentParser:
         default="train",
         type=str,
         help='Raw image split aligned with the feature shards. Defaults to "train".',
+    )
+    parser.add_argument(
+        "--latent_dir_name",
+        default=None,
+        type=str,
     )
     parser.add_argument(
         "--dino_dir_name",
@@ -282,13 +296,13 @@ def get_args_parser() -> argparse.ArgumentParser:
         "--decoder_eval_reference_dir",
         default=None,
         type=str,
-        help="Deprecated and ignored. Online decoder eval now writes reference images from the dataloader.",
+        help="Reference image directory used for torch-fidelity decoder eval.",
     )
     parser.add_argument(
         "--decoder_eval_fid_stats",
-        default=None,
+        default=_DEFAULT_FID_STATS_PATH,
         type=str,
-        help="Deprecated and ignored. Online decoder eval now computes folder-based FID directly.",
+        help="Path to a torch-fidelity FID statistics .npz file used for decoder eval.",
     )
     parser.add_argument("--decoder_eval_fid_batch_size", default=256, type=int)
     parser.add_argument(
@@ -355,9 +369,14 @@ def parse_args() -> argparse.Namespace:
         args.decoder_disc_epochs = args.epochs
     if args.decoder_disc_lr_schedule is None:
         args.decoder_disc_lr_schedule = args.lr_schedule
+    args.latent_dir_name = resolve_feature_dir_name(
+        args.latent_dir_name,
+        "imagenet256_latents",
+        args.image_data_split,
+    )
     args.dino_dir_name = resolve_feature_dir_name(
         args.dino_dir_name,
-        "imagenet224_dinov3_features",
+        "imagenet256_dinov3_features",
         args.image_data_split,
     )
     if not args.resume:
@@ -365,9 +384,13 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def build_decoder_model(args: argparse.Namespace) -> Decoder:
-    return Decoder(
+def build_decoder_model(args: argparse.Namespace) -> DecoderReconstructionModel:
+    decoder = Decoder(
+        input_size=args.latent_size,
         patch_size=args.decoder_patch_size,
+        latent_patch_size=args.decoder_latent_patch_size,
+        in_channels=args.latent_in_channels,
+        bottleneck_dim=args.bottleneck_dim,
         dino_hidden_size=args.dino_hidden_size,
         hidden_size=args.decoder_hidden_size,
         out_channels=args.image_out_channels,
@@ -378,6 +401,7 @@ def build_decoder_model(args: argparse.Namespace) -> Decoder:
         mlp_ratio=args.decoder_mlp_ratio,
         output_image_size=args.decoder_output_image_size,
     )
+    return DecoderReconstructionModel(decoder)
 
 
 def save_decoder_checkpoint(
@@ -425,10 +449,12 @@ def maybe_resume_checkpoint(
     print("Resumed decoder checkpoint from", checkpoint_path)
 
 
-def describe_dataset_plan(dataset: RamLoadedShardDataset, dino_store, *, prefetch: bool) -> None:
+def describe_dataset_plan(dataset: RamLoadedShardDataset, latent_store, dino_store, *, prefetch: bool) -> None:
     plan = dataset.describe_current_plan()
     max_shard_samples = max(span.size for span in dataset.logical_shards)
-    approx_max_ram_bytes = max_shard_samples * dino_store.bytes_per_sample
+    approx_max_ram_bytes = max_shard_samples * (
+        latent_store.bytes_per_sample + dino_store.bytes_per_sample
+    )
     approx_peak_ram_bytes = approx_max_ram_bytes * 2 if prefetch else approx_max_ram_bytes
     print(
         "Decoder RAM shard loading enabled using "
@@ -457,6 +483,7 @@ def describe_dataset_plan(dataset: RamLoadedShardDataset, dino_store, *, prefetc
 
 def build_data_loader(
     *,
+    latent_store,
     dino_store,
     batch_size: int,
     num_tasks: int,
@@ -472,6 +499,7 @@ def build_data_loader(
     pin_mem: bool,
 ):
     dataset = RamLoadedShardDataset(
+        latent_store=latent_store,
         dino_store=dino_store,
         batch_size=batch_size,
         num_replicas=num_tasks,
@@ -535,8 +563,10 @@ def main(args: argparse.Namespace) -> None:
             mode=args.wandb_mode,
         )
 
+    latent_store = inspect_feature_shards(args.data_path, args.latent_dir_name)
     dino_store = inspect_feature_shards(args.data_path, args.dino_dir_name)
     dataset_train, data_loader_train = build_data_loader(
+        latent_store=latent_store,
         dino_store=dino_store,
         batch_size=args.batch_size,
         num_tasks=num_tasks,
@@ -552,6 +582,7 @@ def main(args: argparse.Namespace) -> None:
         pin_mem=args.pin_mem,
     )
     dataset_eval, data_loader_eval = build_data_loader(
+        latent_store=latent_store,
         dino_store=dino_store,
         batch_size=args.batch_size,
         num_tasks=num_tasks,
@@ -570,6 +601,7 @@ def main(args: argparse.Namespace) -> None:
     if global_rank == 0:
         describe_dataset_plan(
             dataset_train,
+            latent_store,
             dino_store,
             prefetch=args.ram_shard_prefetch,
         )

@@ -18,7 +18,7 @@ class DecoderGanTrainingState:
     discriminator: nn.Module
     discriminator_optimizer: torch.optim.Optimizer
     perceptual_loss: nn.Module | None
-    discriminator_augment: nn.Module
+    discriminator_augment: nn.Module | None
     noise_tau: float
     disc_lr: float
     disc_min_lr: float
@@ -26,27 +26,34 @@ class DecoderGanTrainingState:
     disc_total_epochs: int
     disc_lr_schedule: str
     disc_lr_epoch_offset: float
+    discriminator_step: int = 0
 
 
-def set_requires_grad(module: nn.Module, flag: bool) -> None:
+def set_requires_grad(module: nn.Module | None, flag: bool) -> None:
+    if module is None:
+        return
     for parameter in module.parameters():
         parameter.requires_grad_(flag)
 
 
 def apply_noise_augmentation(
-    eva: torch.Tensor,
+    latent: torch.Tensor,
+    dino: torch.Tensor,
     noise_tau: float,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor]:
     if noise_tau <= 0.0:
-        return eva
+        return latent, dino
 
-    batch_size = eva.shape[0]
-    eva_sigma = eva.new_empty(batch_size).normal_(mean=0.0, std=noise_tau).abs_()
+    batch_size = latent.shape[0]
+    latent_sigma = latent.new_empty(batch_size).normal_(mean=0.0, std=noise_tau).abs_()
+    dino_sigma = latent_sigma.to(device=dino.device, dtype=dino.dtype)
 
-    eva_sigma = eva_sigma.view(batch_size, *([1] * (eva.ndim - 1)))
+    latent_sigma = latent_sigma.view(batch_size, *([1] * (latent.ndim - 1)))
+    dino_sigma = dino_sigma.view(batch_size, *([1] * (dino.ndim - 1)))
 
-    eva = eva + eva_sigma * torch.randn_like(eva)
-    return eva
+    latent = latent + latent_sigma * torch.randn_like(latent)
+    dino = dino + dino_sigma * torch.randn_like(dino)
+    return latent, dino
 
 
 def images_to_minus_one_to_one(
@@ -65,11 +72,13 @@ def get_decoder_last_layer(model: nn.Module) -> torch.nn.Parameter:
     decoder = getattr(model, "decoder", model)
     final_layer = getattr(decoder, "final_layer", None)
     linear = getattr(final_layer, "linear", None)
-    if linear is None or not hasattr(linear, "weight"):
-        raise AttributeError(
-            "Adaptive decoder GAN weighting expects decoder.final_layer.linear.weight."
-        )
-    return linear.weight
+    if linear is not None and hasattr(linear, "weight"):
+        return linear.weight
+
+    named_parameters = list(model.named_parameters())
+    if not named_parameters:
+        raise ValueError("Cannot compute adaptive GAN weight for a model without parameters.")
+    return named_parameters[-1][1]
 
 
 def calculate_adaptive_weight(
@@ -83,12 +92,17 @@ def calculate_adaptive_weight(
         reconstruction_loss,
         last_layer,
         retain_graph=True,
+        allow_unused=True,
     )[0]
     generator_grad = torch.autograd.grad(
         generator_loss,
         last_layer,
         retain_graph=True,
+        allow_unused=True,
     )[0]
+
+    if reconstruction_grad is None or generator_grad is None:
+        return last_layer.new_tensor(1.0)
 
     d_weight = torch.norm(reconstruction_grad) / (torch.norm(generator_grad) + eps)
     d_weight = torch.clamp(d_weight, 0.0, max_d_weight)
@@ -114,6 +128,13 @@ def build_decoder_gan_training_state(
         lpips_start=int(args.decoder_lpips_start),
         max_d_weight=float(args.decoder_max_d_weight),
         disc_updates=int(args.decoder_disc_updates),
+        r1_weight=float(plan.gan.loss.r1_weight),
+        r1_interval=int(plan.gan.loss.r1_interval),
+        r1_max_penalty=(
+            None
+            if plan.gan.loss.r1_max_penalty is None
+            else float(plan.gan.loss.r1_max_penalty)
+        ),
     )
 
     discriminator = DinoPatchDiscriminator(
@@ -171,4 +192,5 @@ def build_decoder_gan_training_state(
         disc_total_epochs=int(args.decoder_disc_epochs),
         disc_lr_schedule=str(args.decoder_disc_lr_schedule),
         disc_lr_epoch_offset=float(loss_config.disc_upd_start),
+        discriminator_step=0,
     )

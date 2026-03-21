@@ -20,18 +20,22 @@ class OptimizerConfig:
 class SchedulerConfig:
     type: SchedulerType = "cosine"
     warmup_epochs: int = 1
+    decay_end_epoch: int = 16
+    base_lr: float = 2.0e-4
     final_lr: float = 2.0e-5
+    warmup_from_zero: bool = True
 
 
 @dataclass(frozen=True)
 class DecoderModelConfig:
-    dino_hidden_size: int = 384
+    dino_hidden_size: int = 768
     hidden_size: int = 1152
     depth: int = 12
     num_heads: int = 16
     mlp_ratio: float = 4.0
-    patch_size: int = 14
-    output_image_size: int = 224
+    patch_size: int = 16
+    latent_patch_size: int = 2
+    output_image_size: int = 256
     noise_tau: float = 0.4
 
 
@@ -80,21 +84,29 @@ class DiscriminatorConfig:
 class DecoderLossConfig:
     disc_loss: DiscLossName = "hinge"
     gen_loss: GenLossName = "vanilla"
-    disc_weight: float = 0.75
+    disc_weight: float = 1.5
     perceptual_weight: float = 1.0
     adaptive_weight: bool = True
-    disc_start: int = 8
-    disc_upd_start: int = 6
-    adversarial_warmup_epochs: float = 0.0
+    disc_start: int = 6
+    disc_upd_start: int = 4
+    adversarial_warmup_epochs: float = 2.0
     lpips_start: int = 0
-    max_d_weight: float = 10000.0
+    max_d_weight: float = 5.0
     disc_updates: int = 1
+    r1_weight: float = 10.0
+    r1_interval: int = 16
+    r1_max_penalty: float | None = 1.0
 
     def perceptual_enabled(self, epoch: int) -> bool:
         return epoch >= self.lpips_start
 
     def discriminator_updates_enabled(self, epoch: int) -> bool:
         return epoch >= self.disc_upd_start
+
+    def r1_enabled_for_step(self, discriminator_step: int) -> bool:
+        if self.r1_weight <= 0.0 or self.r1_interval <= 0:
+            return False
+        return discriminator_step % self.r1_interval == 0
 
     def adversarial_enabled(self, epoch: int) -> bool:
         return epoch >= self.disc_start

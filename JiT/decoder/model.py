@@ -3,25 +3,29 @@ import math
 import torch
 from torch import nn
 
-from JiT.model_jit import RMSNorm, SwiGLUFFN
+from JiT.model_jit import BottleneckPatchEmbed, RMSNorm, SwiGLUFFN
 from JiT.util.model_util import get_2d_sincos_pos_embed
 
 
 class Decoder(nn.Module):
-    """Transformer decoder that reconstructs an image from DINO tokens."""
+    """Transformer decoder that reconstructs an image from DINO and latent tokens."""
 
     def __init__(
         self,
+        input_size: int,
         patch_size: int,
+        latent_patch_size: int,
+        in_channels: int,
+        bottleneck_dim: int,
         dino_hidden_size: int,
         hidden_size: int,
         out_channels: int,
         depth: int,
-        attn_drop=0.0,
-        proj_drop=0.0,
-        num_heads=8,
-        mlp_ratio=4.0,
-        output_image_size: int = 224,
+        attn_drop: float = 0.0,
+        proj_drop: float = 0.0,
+        num_heads: int = 8,
+        mlp_ratio: float = 4.0,
+        output_image_size: int = 256,
     ) -> None:
         super().__init__()
         self.dino_hidden_size = dino_hidden_size
@@ -34,40 +38,42 @@ class Decoder(nn.Module):
         self.num_heads = num_heads
         self.mlp_ratio = mlp_ratio
         self.output_image_size = output_image_size
+        self.latent_patch_size = latent_patch_size
 
-        if output_image_size % patch_size != 0:
-            raise ValueError(
-                f"output_image_size={output_image_size} must be divisible by patch_size={patch_size}."
-            )
-        self.grid_size = output_image_size // patch_size
-        self.num_patches = self.grid_size ** 2
-
+        self.latent_tokenizer = BottleneckPatchEmbed(
+            input_size,
+            latent_patch_size,
+            in_channels,
+            bottleneck_dim,
+            hidden_size,
+            bias=True,
+        )
+        self.num_patches = self.latent_tokenizer.num_patches
         self.dino_embedder = nn.Identity() if dino_hidden_size == hidden_size else nn.Linear(
             dino_hidden_size, hidden_size, bias=True
         )
-        self.dino_pos_embed = nn.Parameter(
+        self.pos_embed = nn.Parameter(
             torch.zeros(1, self.num_patches, hidden_size), requires_grad=False
         )
-        self.query_tokens = nn.Parameter(
-            torch.zeros(1, self.num_patches, hidden_size)
-        )
-        self.query_pos_embed = nn.Parameter(
-            torch.zeros(1, self.num_patches, hidden_size)
-        )
-        self.dino_stream_embed = nn.Parameter(torch.zeros(1, 1, hidden_size))
+        self.query_tokens = nn.Parameter(torch.zeros(1, self.num_patches, hidden_size))
+        self.query_pos_embed = nn.Parameter(torch.zeros(1, self.num_patches, hidden_size))
         self.final_layer = DecoderFinalLayer(
             hidden_size=hidden_size,
             patch_size=patch_size,
             out_channels=out_channels,
         )
-        self.blocks = nn.ModuleList([
-            DecoderBlock(
-                hidden_size, num_heads, mlp_ratio=mlp_ratio,
-                attn_drop=self.attn_drop if (
-                    self.depth // 4 * 3 > i >= self.depth // 4) else 0.0,
-                proj_drop=self.proj_drop if (self.depth // 4 * 3 > i >= self.depth // 4) else 0.0)
-            for i in range(self.depth)
-        ])
+        self.blocks = nn.ModuleList(
+            [
+                DecoderBlock(
+                    hidden_size,
+                    num_heads,
+                    mlp_ratio=mlp_ratio,
+                    attn_drop=self.attn_drop if (self.depth // 4 * 3 > i >= self.depth // 4) else 0.0,
+                    proj_drop=self.proj_drop if (self.depth // 4 * 3 > i >= self.depth // 4) else 0.0,
+                )
+                for i in range(self.depth)
+            ]
+        )
         self.init_weights()
 
     def unpatchify(self, x, p):
@@ -87,7 +93,7 @@ class Decoder(nn.Module):
         assert h * w == x.shape[1]
 
         x = x.reshape(shape=(x.shape[0], h, w, p, p, c))
-        x = torch.einsum('nhwpqc->nchpwq', x)
+        x = torch.einsum("nhwpqc->nchpwq", x)
         imgs = x.reshape(shape=(x.shape[0], c, h * p, h * p))
         return imgs
 
@@ -98,6 +104,7 @@ class Decoder(nn.Module):
 
     def init_weights(self):
         """Initialize decoder embeddings, projections, and output head."""
+
         def _basic_init(module):
             if isinstance(module, nn.Linear):
                 nn.init.xavier_uniform_(module.weight)
@@ -106,90 +113,98 @@ class Decoder(nn.Module):
 
         self.apply(_basic_init)
 
-        pos_embed = get_2d_sincos_pos_embed(self.hidden_size, self.grid_size)
-        pos_embed_tensor = torch.from_numpy(pos_embed).float().unsqueeze(0)
-        self.dino_pos_embed.data.copy_(pos_embed_tensor)
+        grid_size = int(self.latent_tokenizer.num_patches ** 0.5)
+        pos_embed = get_2d_sincos_pos_embed(self.pos_embed.shape[-1], grid_size)
+        self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
         nn.init.normal_(self.query_tokens, std=0.02)
         nn.init.normal_(self.query_pos_embed, std=0.02)
-        nn.init.normal_(self.dino_stream_embed, std=0.02)
+
+        w1 = self.latent_tokenizer.proj1.weight.data
+        nn.init.xavier_uniform_(w1.view(w1.shape[0], -1))
+        w2 = self.latent_tokenizer.proj2.weight.data
+        nn.init.xavier_uniform_(w2.view(w2.shape[0], -1))
+        if self.latent_tokenizer.proj2.bias is not None:
+            nn.init.constant_(self.latent_tokenizer.proj2.bias, 0)
         if isinstance(self.dino_embedder, nn.Linear):
-            we = self.dino_embedder.weight.data
-            nn.init.xavier_uniform_(we.view(we.shape[0], -1))
+            wd = self.dino_embedder.weight.data
+            nn.init.xavier_uniform_(wd.view(wd.shape[0], -1))
             nn.init.constant_(self.dino_embedder.bias, 0)
 
-        # Scale residual-stream projections for stability across depth.
         residual_scale = 1 / math.sqrt(2 * max(self.depth, 1))
         for block in self.blocks:
             block.attn.proj.weight.data.mul_(residual_scale)
             block.attn.proj_cross.weight.data.mul_(residual_scale)
             block.mlp.w3.weight.data.mul_(residual_scale)
 
-        # Keep the pixel head small so reconstruction starts near zero/mean.
         final_std = 0.02 / math.sqrt(2 * max(self.depth, 1))
         nn.init.normal_(self.final_layer.linear.weight, std=final_std)
         nn.init.constant_(self.final_layer.linear.bias, 0)
 
-    def _prepare_feature_tokens(
-        self,
-        features: torch.Tensor,
-        *,
-        expected_hidden_size: int,
-        stream_name: str,
-    ) -> torch.Tensor:
-        if features.ndim == 4:
-            features = features.flatten(2).transpose(1, 2)
-        elif features.ndim != 3:
+    def _prepare_dino_tokens(self, dino: torch.Tensor) -> torch.Tensor:
+        if dino.ndim == 4:
+            dino = dino.flatten(2).transpose(1, 2)
+        elif dino.ndim != 3:
             raise ValueError(
-                f"{stream_name} features must be rank-3 or rank-4, got shape {tuple(features.shape)}."
+                f"DINO features must be rank-3 or rank-4, got shape {tuple(dino.shape)}."
             )
 
-        if features.shape[-1] != expected_hidden_size:
+        if dino.shape[-1] != self.dino_hidden_size:
             raise ValueError(
-                f"Expected {stream_name} channel width {expected_hidden_size}, got {features.shape[-1]}."
+                f"Expected DINO channel width {self.dino_hidden_size}, got {dino.shape[-1]}."
             )
-        if features.shape[1] != self.num_patches:
+        if dino.shape[1] != self.num_patches:
             raise ValueError(
-                f"Expected {self.num_patches} {stream_name} tokens, got {features.shape[1]}."
+                f"Expected {self.num_patches} DINO tokens to match latent patches, got {dino.shape[1]}."
             )
-        return features
 
-    def _build_context_tokens(self, dino_tokens: torch.Tensor) -> torch.Tensor:
-        dino_tokens = dino_tokens + self.dino_pos_embed + self.dino_stream_embed
-        return dino_tokens
+        return self.dino_embedder(dino) + self.pos_embed
 
-    def forward(self, dino):
+    def forward(self, dino, latent):
         """
-        Decode aligned DINO tokens into an output image.
+        Decode a pair of aligned context streams into an output image.
 
         Args:
             dino: DINO features of shape ``[B, D, H, W]`` or DINO tokens ``[B, T, D]``.
+            latent: Latent feature map consumed by ``latent_tokenizer``.
 
         Returns:
             Reconstructed image tensor of shape ``[B, C, H, W]``.
         """
-        dino_tokens = self._prepare_feature_tokens(
-            dino,
-            expected_hidden_size=self.dino_hidden_size,
-            stream_name="DINO",
-        )
-        dino_tokens = self.dino_embedder(dino_tokens)
+        latent_tokens = self.latent_tokenizer(latent)
+        latent_tokens = latent_tokens + self.pos_embed
+        dino = self._prepare_dino_tokens(dino)
 
-        # Use one shared set of learnable query slots and broadcast it across the batch.
-        x = self.query_tokens.expand(dino_tokens.shape[0], -1, -1)
+        x = self.query_tokens.expand(latent.shape[0], -1, -1)
         x = x + self.query_pos_embed
-        ctx_tokens = self._build_context_tokens(dino_tokens)
+        ctx_tokens = torch.cat([dino, latent_tokens], dim=1)
         for block in self.blocks:
             x = block(x, ctx_tokens)
         return self.tokens_to_image(x)
 
-    def generate(self, dino):
+    def generate(self, latent, dino):
         """Inference entrypoint expected by decoder evaluation."""
-        return self.forward(dino)
+        return self.forward(dino, latent)
+
+
+class DecoderReconstructionModel(nn.Module):
+    """Wrap a decoder with the train/eval API used by ``JiT/decoder/train.py``."""
+
+    def __init__(self, decoder: nn.Module) -> None:
+        super().__init__()
+        self.decoder = decoder
+
+    def generate(self, latent, dino):
+        """Reconstruct RGB images from aligned latent and DINO features."""
+        return self.decoder.generate(latent, dino)
+
+    def forward(self, latent, dino):
+        return self.generate(latent, dino)
+
 
 class CrossAttention(nn.Module):
     """Self-attention over decoder queries followed by cross-attention into context."""
 
-    def __init__(self, dim, num_heads=8, qkv_bias=True, qk_norm=True, attn_drop=0., proj_drop=0.):
+    def __init__(self, dim, num_heads=8, qkv_bias=True, qk_norm=True, attn_drop=0.0, proj_drop=0.0):
         super().__init__()
         self.num_heads = num_heads
         head_dim = dim // num_heads
@@ -233,33 +248,32 @@ class CrossAttention(nn.Module):
                 f"Hidden size mismatch between decoder tokens ({C}) and context ({C_ctx})."
             )
 
-        # self-attn
         q, k, v = self.qkv(x_in).chunk(3, dim=-1)
-        q = self.q_norm(q.reshape(B, N, self.num_heads,
-                                  head_dim).transpose(1, 2))
-        k = self.k_norm(k.reshape(B, N, self.num_heads,
-                                  head_dim).transpose(1, 2))
+        q = self.q_norm(q.reshape(B, N, self.num_heads, head_dim).transpose(1, 2))
+        k = self.k_norm(k.reshape(B, N, self.num_heads, head_dim).transpose(1, 2))
         v = v.reshape(B, N, self.num_heads, head_dim).transpose(1, 2)
 
         self_out = torch.nn.functional.scaled_dot_product_attention(
-            q, k, v, dropout_p=self.attn_drop.p if self.training else 0.
+            q,
+            k,
+            v,
+            dropout_p=self.attn_drop.p if self.training else 0.0,
         )
         self_out = self_out.transpose(1, 2).reshape(B, N, C)
         x = x_in + self.proj_drop(self.proj(self_out))
 
-        # cross-attn
         q_cross = self.cross_q(x)
         k_cross, v_cross = self.cross_kv(ctx).chunk(2, dim=-1)
 
-        q_cross = self.q_cross_norm(q_cross.reshape(
-            B, N, self.num_heads, head_dim).transpose(1, 2))
-        k_cross = self.k_cross_norm(k_cross.reshape(
-            B_ctx, N_ctx, self.num_heads, head_dim).transpose(1, 2))
-        v_cross = v_cross.reshape(
-            B_ctx, N_ctx, self.num_heads, head_dim).transpose(1, 2)
+        q_cross = self.q_cross_norm(q_cross.reshape(B, N, self.num_heads, head_dim).transpose(1, 2))
+        k_cross = self.k_cross_norm(k_cross.reshape(B_ctx, N_ctx, self.num_heads, head_dim).transpose(1, 2))
+        v_cross = v_cross.reshape(B_ctx, N_ctx, self.num_heads, head_dim).transpose(1, 2)
 
         cross_out = torch.nn.functional.scaled_dot_product_attention(
-            q_cross, k_cross, v_cross, dropout_p=self.attn_drop.p if self.training else 0.
+            q_cross,
+            k_cross,
+            v_cross,
+            dropout_p=self.attn_drop.p if self.training else 0.0,
         )
         cross_out = cross_out.transpose(1, 2).reshape(B, N, C)
         x = x + self.proj_cross_drop(self.proj_cross(cross_out))
@@ -294,10 +308,8 @@ class DecoderBlock(nn.Module):
 
     def forward(self, x, ctx):
         """Refine query tokens with attention and then a per-token feed-forward update."""
-        # Attention already applies its own residual updates for self- and cross-attention.
         x = self.attn(self.norm1(x), ctx)
         x = x + self.mlp(self.norm2(x))
-
         return x
 
 
@@ -308,7 +320,9 @@ class DecoderFinalLayer(nn.Module):
         super().__init__()
         self.norm_final = RMSNorm(hidden_size, eps=1e-6)
         self.linear = nn.Linear(
-            hidden_size, patch_size * patch_size * out_channels, bias=True
+            hidden_size,
+            patch_size * patch_size * out_channels,
+            bias=True,
         )
 
     def forward(self, x):
@@ -316,3 +330,19 @@ class DecoderFinalLayer(nn.Module):
         x = self.norm_final(x)
         x = self.linear(x)
         return x
+
+
+def Small(**kwargs):
+    return Decoder(
+        input_size=32,
+        patch_size=16,
+        latent_patch_size=2,
+        in_channels=4,
+        bottleneck_dim=128,
+        dino_hidden_size=768,
+        hidden_size=768,
+        out_channels=3,
+        depth=12,
+        output_image_size=256,
+        **kwargs,
+    )
