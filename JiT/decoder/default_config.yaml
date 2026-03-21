@@ -1,8 +1,8 @@
 decoder:
   dino_hidden_size: 384
-  hidden_size: 768
+  hidden_size: 1536
   depth: 12
-  num_heads: 12
+  num_heads: 24
   mlp_ratio: 4.0
   patch_size: 14
   output_image_size: 224
