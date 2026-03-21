@@ -237,11 +237,11 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model-name",
         type=str,
-        default="vit_small_patch14_dinov2.lvd142m",
+        default="timm/vit_base_patch16_dinov3.lvd1689m",
     )
     parser.add_argument("--image-size", type=int, default=224)
-    parser.add_argument("--hidden-size", type=int, default=384)
-    parser.add_argument("--patch-size", type=int, default=14)
+    parser.add_argument("--hidden-size", type=int, default=768)
+    parser.add_argument("--patch-size", type=int, default=16)
     parser.add_argument("--max-shard-size-mb", type=int, default=4096)
     args = parser.parse_args()
     main(args)
