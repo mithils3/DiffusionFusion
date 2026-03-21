@@ -52,11 +52,11 @@ def _unwrap_model(model):
     return model.module if hasattr(model, "module") else model
 
 
-def _forward_reconstruction(model, eva: torch.Tensor) -> torch.Tensor:
-    reconstructed = model(eva)
+def _forward_reconstruction(model, dino: torch.Tensor) -> torch.Tensor:
+    reconstructed = model(dino)
     if not isinstance(reconstructed, torch.Tensor):
         raise TypeError(
-            "Decoder training expects model(eva) to return a reconstruction tensor."
+            "Decoder training expects model(dino) to return a reconstruction tensor."
         )
     return reconstructed
 
@@ -312,12 +312,12 @@ def train_epoch(
                 lr_schedule=gan_state.disc_lr_schedule,
             )
 
-        eva = batch["eva"].to(device, non_blocking=True)
+        dino = batch["dino"].to(device, non_blocking=True)
         target_image = batch["image"].to(device, non_blocking=True)
-        eva_input = eva
+        dino_input = dino
         if gan_state is not None:
-            eva_input = apply_noise_augmentation(
-                eva_input,
+            dino_input = apply_noise_augmentation(
+                dino_input,
                 gan_state.noise_tau,
             )
 
@@ -328,7 +328,7 @@ def train_epoch(
                     with _autocast_context(device):
                         reconstructed_for_disc = _forward_reconstruction(
                             model,
-                            eva_input,
+                            dino_input,
                         )
                 disc_metrics = _discriminator_step(
                     gan_state=gan_state,
@@ -342,7 +342,7 @@ def train_epoch(
 
         optimizer.zero_grad(set_to_none=True)
         with _autocast_context(device):
-            reconstructed = _forward_reconstruction(model, eva_input)
+            reconstructed = _forward_reconstruction(model, dino_input)
 
         use_perceptual = gan_state is not None and gan_state.loss_config.perceptual_enabled(epoch)
         perceptual_module = gan_state.perceptual_loss if use_perceptual else None
@@ -539,13 +539,13 @@ def evaluate(
     local_mse_count = 0
     with torch.no_grad():
         for step_idx, batch in enumerate(metric_logger.log_every(eval_iterable, print_freq, header, num_steps)):
-            eva = batch["eva"].to(device, non_blocking=True)
+            dino = batch["dino"].to(device, non_blocking=True)
             target_image = batch["image"].to(device, non_blocking=True)
             labels = batch["y"]
             sample_ids = batch["sample_id"].cpu().numpy().astype(np.int64, copy=False)
 
             with _autocast_context(device):
-                reconstructed = model_without_ddp.generate(eva)
+                reconstructed = model_without_ddp.generate(dino)
             batch_indices = (
                 step_idx * world_size * eval_batch_size
                 + local_rank * eval_batch_size

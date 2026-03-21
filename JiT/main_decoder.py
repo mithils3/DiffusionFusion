@@ -94,7 +94,7 @@ def get_args_parser() -> argparse.ArgumentParser:
     )
 
     # decoder architecture
-    parser.add_argument("--eva_hidden_size", default=decoder_defaults.eva_hidden_size, type=int)
+    parser.add_argument("--dino_hidden_size", default=decoder_defaults.dino_hidden_size, type=int)
     parser.add_argument("--image_out_channels", default=3, type=int)
     parser.add_argument("--attn_dropout", default=0.0, type=float)
     parser.add_argument("--proj_dropout", default=0.0, type=float)
@@ -177,7 +177,7 @@ def get_args_parser() -> argparse.ArgumentParser:
         help='Raw image split aligned with the feature shards. Defaults to "train".',
     )
     parser.add_argument(
-        "--eva_dir_name",
+        "--dino_dir_name",
         default=None,
         type=str,
     )
@@ -355,9 +355,9 @@ def parse_args() -> argparse.Namespace:
         args.decoder_disc_epochs = args.epochs
     if args.decoder_disc_lr_schedule is None:
         args.decoder_disc_lr_schedule = args.lr_schedule
-    args.eva_dir_name = resolve_feature_dir_name(
-        args.eva_dir_name,
-        "imagenet224_eva02_small_features",
+    args.dino_dir_name = resolve_feature_dir_name(
+        args.dino_dir_name,
+        "imagenet224_dinov3_features",
         args.image_data_split,
     )
     if not args.resume:
@@ -368,7 +368,7 @@ def parse_args() -> argparse.Namespace:
 def build_decoder_model(args: argparse.Namespace) -> Decoder:
     return Decoder(
         patch_size=args.decoder_patch_size,
-        eva_hidden_size=args.eva_hidden_size,
+        dino_hidden_size=args.dino_hidden_size,
         hidden_size=args.decoder_hidden_size,
         out_channels=args.image_out_channels,
         depth=args.decoder_depth,
@@ -425,10 +425,10 @@ def maybe_resume_checkpoint(
     print("Resumed decoder checkpoint from", checkpoint_path)
 
 
-def describe_dataset_plan(dataset: RamLoadedShardDataset, eva_store, *, prefetch: bool) -> None:
+def describe_dataset_plan(dataset: RamLoadedShardDataset, dino_store, *, prefetch: bool) -> None:
     plan = dataset.describe_current_plan()
     max_shard_samples = max(span.size for span in dataset.logical_shards)
-    approx_max_ram_bytes = max_shard_samples * eva_store.bytes_per_sample
+    approx_max_ram_bytes = max_shard_samples * dino_store.bytes_per_sample
     approx_peak_ram_bytes = approx_max_ram_bytes * 2 if prefetch else approx_max_ram_bytes
     print(
         "Decoder RAM shard loading enabled using "
@@ -457,7 +457,7 @@ def describe_dataset_plan(dataset: RamLoadedShardDataset, eva_store, *, prefetch
 
 def build_data_loader(
     *,
-    eva_store,
+    dino_store,
     batch_size: int,
     num_tasks: int,
     global_rank: int,
@@ -472,7 +472,7 @@ def build_data_loader(
     pin_mem: bool,
 ):
     dataset = RamLoadedShardDataset(
-        eva_store=eva_store,
+        dino_store=dino_store,
         batch_size=batch_size,
         num_replicas=num_tasks,
         rank=global_rank,
@@ -535,9 +535,9 @@ def main(args: argparse.Namespace) -> None:
             mode=args.wandb_mode,
         )
 
-    eva_store = inspect_feature_shards(args.data_path, args.eva_dir_name)
+    dino_store = inspect_feature_shards(args.data_path, args.dino_dir_name)
     dataset_train, data_loader_train = build_data_loader(
-        eva_store=eva_store,
+        dino_store=dino_store,
         batch_size=args.batch_size,
         num_tasks=num_tasks,
         global_rank=global_rank,
@@ -552,7 +552,7 @@ def main(args: argparse.Namespace) -> None:
         pin_mem=args.pin_mem,
     )
     dataset_eval, data_loader_eval = build_data_loader(
-        eva_store=eva_store,
+        dino_store=dino_store,
         batch_size=args.batch_size,
         num_tasks=num_tasks,
         global_rank=global_rank,
@@ -570,7 +570,7 @@ def main(args: argparse.Namespace) -> None:
     if global_rank == 0:
         describe_dataset_plan(
             dataset_train,
-            eva_store,
+            dino_store,
             prefetch=args.ram_shard_prefetch,
         )
 

@@ -332,11 +332,11 @@ def _load_feature_range_to_ram(
 
 
 class RamLoadedShardDataset(IterableDataset):
-    """Iterable dataset that keeps one logical EVA shard per rank in RAM."""
+    """Iterable dataset that keeps one logical DINO shard per rank in RAM."""
 
     def __init__(
         self,
-        eva_store: FeatureShardStore,
+        dino_store: FeatureShardStore,
         batch_size: int,
         num_replicas: int = -1,
         rank: int = -1,
@@ -361,7 +361,7 @@ class RamLoadedShardDataset(IterableDataset):
                 "RamLoadedShardDataset requires image_data_path because decoder training always needs raw images."
             )
 
-        self.eva_store = eva_store
+        self.dino_store = dino_store
         self.batch_size = batch_size
         self.num_replicas = num_replicas
         self.rank = rank
@@ -372,7 +372,7 @@ class RamLoadedShardDataset(IterableDataset):
         self.epoch = 0
         self.image_store = RawImageStore(
             image_data_path,
-            eva_store,
+            dino_store,
             split=image_data_split,
             model_name=image_model_name,
             image_size=image_size,
@@ -380,7 +380,7 @@ class RamLoadedShardDataset(IterableDataset):
 
         self.logical_shards = [
             LogicalShardSpan(span.global_start, span.global_end)
-            for span in self.eva_store.shard_spans
+            for span in self.dino_store.shard_spans
         ]
         if not self.logical_shards:
             raise ValueError(
@@ -427,7 +427,7 @@ class RamLoadedShardDataset(IterableDataset):
             "num_samples_per_rank": num_samples_per_rank,
             "num_batches": num_samples_per_rank // self.batch_size,
             "logical_shard_count": len(self.logical_shards),
-            "logical_shard_source": self.eva_store.name,
+            "logical_shard_source": self.dino_store.name,
         }
         return self._cached_plan
 
@@ -445,20 +445,20 @@ class RamLoadedShardDataset(IterableDataset):
         }
 
     def _load_logical_shard(self, shard_span: LogicalShardSpan) -> Dict[str, np.ndarray]:
-        eva_rows = _load_feature_range_to_ram(
-            self.eva_store, shard_span.global_start, shard_span.global_end
+        dino_rows = _load_feature_range_to_ram(
+            self.dino_store, shard_span.global_start, shard_span.global_end
         )
 
         return {
-            "eva": eva_rows["feature"],
-            "y": eva_rows["label"],
-            "sample_id": eva_rows["sample_id"],
+            "dino": dino_rows["feature"],
+            "y": dino_rows["label"],
+            "sample_id": dino_rows["sample_id"],
         }
 
     def _format_batch(self, rows: Dict[str, np.ndarray]) -> Dict[str, torch.Tensor]:
-        eva = normalize_feature_map_tokens(torch.from_numpy(rows["eva"]))
+        dino = normalize_feature_map_tokens(torch.from_numpy(rows["dino"]))
         return {
-            "eva": eva,
+            "dino": dino,
             "y": torch.from_numpy(rows["y"]),
             "sample_id": torch.from_numpy(rows["sample_id"]),
             "image": self.image_store.load_batch(rows["sample_id"]),
