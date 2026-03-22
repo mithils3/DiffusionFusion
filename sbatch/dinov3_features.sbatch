@@ -22,7 +22,7 @@ cd /u/msalunkhe/DiffusionFusion/JiT
 git pull
 IMAGENET_PATH="ILSVRC/imagenet-1k"
 OUTPUT_DIR="/work/hdd/bgnp/msalunkhe/data/imagenet"
-SPLIT="${SPLIT:-train}"
+SPLIT="${SPLIT:-validation}"
 HF_DATASET_NAME="${HF_DATASET_NAME:-imagenet256_dinov3_features}"
 # Avoid thread explosion across DDP ranks + DataLoader workers.
 torchrun --nproc_per_node=auto --nnodes=1 --node_rank=0 \
