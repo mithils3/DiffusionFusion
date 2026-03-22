@@ -221,14 +221,17 @@ class TimmDinoBackbone(nn.Module):
             images = F.interpolate(images, size=(self.input_size, self.input_size), mode="bilinear", align_corners=False)
         images = images * self.x_scale + self.x_shift
 
-        with torch.set_grad_enabled(not self.freeze_backbone):
-            outputs = self.backbone.forward_intermediates(
-                images,
-                indices=self.key_depths,
-                norm=False,
-                output_fmt="NCHW",
-                intermediates_only=False,
-            )
+        # Keep the backbone parameters frozen via requires_grad_(False), but do
+        # not wrap the forward in no_grad(): the generator adversarial step
+        # still needs gradients to flow from discriminator logits back to the
+        # reconstructed image.
+        outputs = self.backbone.forward_intermediates(
+            images,
+            indices=self.key_depths,
+            norm=False,
+            output_fmt="NCHW",
+            intermediates_only=False,
+        )
 
         final_tokens, intermediates = outputs
         if final_tokens.ndim != 3:

@@ -32,7 +32,10 @@ def set_requires_grad(module: nn.Module | None, flag: bool) -> None:
     if module is None:
         return
     for parameter in module.parameters():
-        parameter.requires_grad_(flag)
+        if not hasattr(parameter, "_original_requires_grad"):
+            parameter._original_requires_grad = parameter.requires_grad
+        target_flag = parameter._original_requires_grad if flag else False
+        parameter.requires_grad_(target_flag)
 
 
 def apply_noise_augmentation(
