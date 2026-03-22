@@ -22,7 +22,7 @@ cd /u/msalunkhe/DiffusionFusion/JiT
 git pull
 IMAGENET_PATH="ILSVRC/imagenet-1k"
 OUTPUT_DIR="/work/hdd/bgnp/msalunkhe/data/imagenet"
-SPLIT="${SPLIT:-validation}"
+SPLIT="${SPLIT:-train}"
 HF_DATASET_NAME="${HF_DATASET_NAME:-}"
 EXTRA_ARGS=()
 if [[ -n "${HF_DATASET_NAME}" ]]; then
