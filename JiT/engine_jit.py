@@ -6,11 +6,10 @@ import time
 
 import torch
 import numpy as np
-import cv2
 
 import JiT.util.misc as misc
 import JiT.util.lr_sched as lr_sched
-import torch_fidelity
+from JiT.eval.diffusion_decoder import decode_with_decoder, compute_fid
 import copy
 from PIL import Image
 try:
@@ -79,7 +78,7 @@ def train_one_epoch(model, model_without_ddp, data_loader, optimizer, device, ep
     print(f"Finished ")
 
 
-def evaluate(model_without_ddp, args, epoch, vae, batch_size=64, log_writer=None, wandb_run=None, wandb_step=None):
+def evaluate(model_without_ddp, args, epoch, decoder, batch_size=64, log_writer=None, wandb_run=None, wandb_step=None):
     print("Start evaluation at epoch {}".format(epoch))
     model_without_ddp.eval()
     world_size = misc.get_world_size()
@@ -141,11 +140,8 @@ def evaluate(model_without_ddp, args, epoch, vae, batch_size=64, log_writer=None
         torch.distributed.barrier()
 
         print("Decoding step {}/{}".format(step_idx, num_steps))
-        sampled_latents = vae.decode(
-            sampled_latents / vae.config.scaling_factor).sample
-        sampled_latents = torch.clamp(127.5 * sampled_latents + 128.0, 0, 255).permute(
-            0, 2, 3, 1).to("cpu", dtype=torch.uint8).numpy()
-        for sample_idx, sample in enumerate(sampled_latents):
+        sampled_images = decode_with_decoder(decoder, sampled_latents, sampled_dino)
+        for sample_idx, sample in enumerate(sampled_images):
             index = sample_idx + world_size * batch_size * \
                 step_idx + local_rank * batch_size
             if index >= args.num_images:
@@ -184,30 +180,21 @@ def evaluate(model_without_ddp, args, epoch, vae, batch_size=64, log_writer=None
 
     if metrics_requested and misc.is_main_process():
 
-        fid_statistics_file = '/work/nvme/betw/msalunkhe/data/jit_in256_stats.npz'
-        metrics_dict = torch_fidelity.calculate_metrics(
-            input1=save_folder,
-            input2=None,
-            fid_statistics_file=fid_statistics_file,
-            cuda=True,
-            isc=True,
-            fid=True,
-            kid=False,
-            prc=False,
-            verbose=True,
+        fid = compute_fid(
+            generated_dir=save_folder,
+            reference_path=args.fid_reference,
+            device=torch.device("cuda"),
+            batch_size=getattr(args, "fid_batch_size", 256),
+            dims=getattr(args, "fid_dims", 2048),
+            num_workers=getattr(args, "fid_num_workers", 4),
         )
-        fid = metrics_dict['frechet_inception_distance']
-        inception_score = metrics_dict['inception_score_mean']
         postfix = "_cfg{}_res{}".format(
             model_without_ddp.cfg_scale, args.latent_size)
         if log_writer is not None:
             log_writer.add_scalar('fid{}'.format(postfix), fid, epoch)
-            log_writer.add_scalar('is{}'.format(postfix),
-                                  inception_score, epoch)
         if misc.is_main_process() and wandb_run is not None:
             log_payload = {
                 'eval/fid{}'.format(postfix): fid,
-                'eval/is{}'.format(postfix): inception_score,
             }
             if wandb_table is not None and len(wandb_table.data) > 0:
                 log_payload['eval/samples{}'.format(postfix)] = wandb_table
@@ -215,10 +202,9 @@ def evaluate(model_without_ddp, args, epoch, vae, batch_size=64, log_writer=None
                 wandb_run.log(log_payload)
             else:
                 wandb_run.log(log_payload, step=wandb_step)
-        print("FID: {:.4f}, Inception Score: {:.4f}".format(
-            fid, inception_score))
+        print("FID: {:.4f}".format(fid))
         with open(metrics_done_path, "w", encoding="utf-8") as f:
-            f.write(f"{fid},{inception_score}\n")
+            f.write(f"{fid}\n")
     elif metrics_requested:
         wait_start = time.time()
         wait_timeout = float(getattr(args, "dist_timeout_sec", 7200))

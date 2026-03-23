@@ -18,7 +18,7 @@ from JiT.util.dataset import (
 import copy
 from JiT.engine_jit import train_one_epoch, evaluate
 from JiT.denoiser import Denoiser
-from diffusers.models import AutoencoderKL
+from JiT.eval.diffusion_decoder import load_decoder_for_eval
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -39,8 +39,11 @@ def get_args_parser():
                         default=0.0, help='Attention dropout rate')
     parser.add_argument('--proj_dropout', type=float,
                         default=0.0, help='Projection dropout rate')
-    parser.add_argument('--vae_pretrained_path', type=str,
-                        default='stabilityai/sdxl-vae')
+    parser.add_argument('--decoder_checkpoint', type=str, default=None,
+                        help='Path to trained decoder checkpoint for eval decoding')
+    parser.add_argument('--decoder_checkpoint_key', type=str, default='auto',
+                        choices=['auto', 'model', 'model_ema'],
+                        help='Decoder checkpoint state dict key to load')
     parser.add_argument("--dino_hidden_size", type=int, default=768,
                         help="Hidden size of DINO features (e.g. 768 for DiT-B/2)")
 
@@ -118,6 +121,15 @@ def get_args_parser():
     parser.add_argument('--evaluate_gen', action='store_true')
     parser.add_argument('--gen_bsz', type=int, default=256,
                         help='Generation batch size')
+    parser.add_argument('--fid_reference', type=str, default=None,
+                        help='Reference image directory or .npz stats file for pytorch-fid')
+    parser.add_argument('--fid_batch_size', type=int, default=256,
+                        help='Batch size for pytorch-fid feature extraction')
+    parser.add_argument('--fid_dims', type=int, default=2048,
+                        choices=[64, 192, 768, 2048],
+                        help='Inception feature dimensionality for pytorch-fid')
+    parser.add_argument('--fid_num_workers', type=int, default=4,
+                        help='Worker count for pytorch-fid')
 
     # dataset
     parser.add_argument('--data_path', default='./data/imagenet', type=str,
@@ -265,7 +277,25 @@ def main(args):
     print("Number of trainable parameters: {:.6f}M".format(n_params / 1e6))
 
     model.to(device)
-    vae = AutoencoderKL.from_pretrained(args.vae_pretrained_path).to(device)
+
+    # Load custom decoder for eval (replaces SDXL VAE decoding)
+    decoder = None
+    needs_eval = args.online_eval or args.evaluate_gen
+    if needs_eval:
+        if not args.decoder_checkpoint:
+            raise ValueError(
+                "Evaluation requires --decoder_checkpoint pointing to a trained decoder."
+            )
+        if not args.fid_reference:
+            raise ValueError(
+                "Evaluation requires --fid_reference pointing to a reference image directory "
+                "or .npz stats file for pytorch-fid."
+            )
+        decoder = load_decoder_for_eval(
+            args.decoder_checkpoint, device, args.decoder_checkpoint_key,
+        )
+        print(f"Rank {global_rank}: loaded decoder from {args.decoder_checkpoint}")
+
     eff_batch_size = args.batch_size * misc.get_world_size()
     if args.lr is None:  # only base_lr (blr) is specified
         args.lr = args.blr * eff_batch_size / 256
@@ -339,7 +369,7 @@ def main(args):
                         0,
                         batch_size=args.gen_bsz,
                         log_writer=log_writer,
-                        vae=vae,
+                        decoder=decoder,
                         wandb_run=wandb_run,
                     )
             return
@@ -401,7 +431,7 @@ def main(args):
                         epoch,
                         batch_size=args.gen_bsz,
                         log_writer=log_writer,
-                        vae=vae,
+                        decoder=decoder,
                         wandb_run=wandb_run,
                         wandb_step=(epoch + 1) * steps_per_epoch,
                     )
