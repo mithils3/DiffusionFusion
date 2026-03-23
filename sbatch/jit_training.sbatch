@@ -21,14 +21,14 @@ source /u/msalunkhe/.venv/bin/activate
 cd /u/msalunkhe/DiffusionFusion/JiT
 git pull
 IMAGENET_PATH="/work/hdd/bgnp/msalunkhe/data/imagenet/"
-OUTPUT_DIR="/work/nvme/bgnp/msalunkhe/outputs/jit_large_patch_size_2_dino_latent_naive"
+OUTPUT_DIR="/work/nvme/bgnp/msalunkhe/outputs/jit_base_patch_size_2_dino_latent_large_hidden_size"
 mkdir -p "${OUTPUT_DIR}"
 OMP_NUM_THREADS=16 torchrun \
 --nproc_per_node=auto \
 --nnodes=1 \
 --node_rank=0 \
 main_jit.py \
---model JiT-L/2-4C \
+--model JiT-B/2-4C \
 --proj_dropout 0.0 \
 --P_mean -0.8 \
 --P_std 0.8 \
