@@ -9,7 +9,8 @@ import numpy as np
 
 import JiT.util.misc as misc
 import JiT.util.lr_sched as lr_sched
-from JiT.eval.diffusion_decoder import decode_with_decoder, compute_fid
+from JiT.eval.diffusion_decoder import decode_with_decoder
+import torch_fidelity
 import copy
 from PIL import Image
 try:
@@ -180,21 +181,30 @@ def evaluate(model_without_ddp, args, epoch, decoder, batch_size=64, log_writer=
 
     if metrics_requested and misc.is_main_process():
 
-        fid = compute_fid(
-            generated_dir=save_folder,
-            reference_path=args.fid_reference,
-            device=torch.device("cuda"),
-            batch_size=getattr(args, "fid_batch_size", 256),
-            dims=getattr(args, "fid_dims", 2048),
-            num_workers=getattr(args, "fid_num_workers", 4),
+        fid_statistics_file = '/work/nvme/betw/msalunkhe/data/jit_in256_stats.npz'
+        metrics_dict = torch_fidelity.calculate_metrics(
+            input1=save_folder,
+            input2=None,
+            fid_statistics_file=fid_statistics_file,
+            cuda=True,
+            isc=True,
+            fid=True,
+            kid=False,
+            prc=False,
+            verbose=True,
         )
+        fid = metrics_dict['frechet_inception_distance']
+        inception_score = metrics_dict['inception_score_mean']
         postfix = "_cfg{}_res{}".format(
             model_without_ddp.cfg_scale, args.latent_size)
         if log_writer is not None:
             log_writer.add_scalar('fid{}'.format(postfix), fid, epoch)
+            log_writer.add_scalar('is{}'.format(postfix),
+                                  inception_score, epoch)
         if misc.is_main_process() and wandb_run is not None:
             log_payload = {
                 'eval/fid{}'.format(postfix): fid,
+                'eval/is{}'.format(postfix): inception_score,
             }
             if wandb_table is not None and len(wandb_table.data) > 0:
                 log_payload['eval/samples{}'.format(postfix)] = wandb_table
@@ -202,9 +212,10 @@ def evaluate(model_without_ddp, args, epoch, decoder, batch_size=64, log_writer=
                 wandb_run.log(log_payload)
             else:
                 wandb_run.log(log_payload, step=wandb_step)
-        print("FID: {:.4f}".format(fid))
+        print("FID: {:.4f}, Inception Score: {:.4f}".format(
+            fid, inception_score))
         with open(metrics_done_path, "w", encoding="utf-8") as f:
-            f.write(f"{fid}\n")
+            f.write(f"{fid},{inception_score}\n")
     elif metrics_requested:
         wait_start = time.time()
         wait_timeout = float(getattr(args, "dist_timeout_sec", 7200))

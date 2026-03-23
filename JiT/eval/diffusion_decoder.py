@@ -121,34 +121,3 @@ def decode_with_decoder(
         images = decoder.generate(latent, dino)
     images = torch.clamp(127.5 * images + 128.0, 0, 255)
     return images.permute(0, 2, 3, 1).to("cpu", dtype=torch.uint8).numpy()
-
-
-def compute_fid(
-    generated_dir: str | Path,
-    reference_path: str | Path,
-    device: torch.device,
-    batch_size: int = 256,
-    dims: int = 2048,
-    num_workers: int = 4,
-) -> float:
-    """Compute FID between generated images and a reference using pytorch-fid.
-
-    *reference_path* may be a directory of images **or** a ``.npz`` file
-    containing pre-computed Inception statistics (keys ``mu``, ``sigma``).
-    """
-    try:
-        from pytorch_fid.fid_score import calculate_fid_given_paths
-    except ImportError as exc:
-        raise ImportError(
-            "pytorch-fid is required for evaluation. Install with `pip install pytorch-fid`."
-        ) from exc
-
-    return float(
-        calculate_fid_given_paths(
-            [str(generated_dir), str(reference_path)],
-            batch_size=batch_size,
-            device=device,
-            dims=dims,
-            num_workers=num_workers,
-        )
-    )

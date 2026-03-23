@@ -121,15 +121,6 @@ def get_args_parser():
     parser.add_argument('--evaluate_gen', action='store_true')
     parser.add_argument('--gen_bsz', type=int, default=256,
                         help='Generation batch size')
-    parser.add_argument('--fid_reference', type=str, default=None,
-                        help='Reference image directory or .npz stats file for pytorch-fid')
-    parser.add_argument('--fid_batch_size', type=int, default=256,
-                        help='Batch size for pytorch-fid feature extraction')
-    parser.add_argument('--fid_dims', type=int, default=2048,
-                        choices=[64, 192, 768, 2048],
-                        help='Inception feature dimensionality for pytorch-fid')
-    parser.add_argument('--fid_num_workers', type=int, default=4,
-                        help='Worker count for pytorch-fid')
 
     # dataset
     parser.add_argument('--data_path', default='./data/imagenet', type=str,
@@ -285,11 +276,6 @@ def main(args):
         if not args.decoder_checkpoint:
             raise ValueError(
                 "Evaluation requires --decoder_checkpoint pointing to a trained decoder."
-            )
-        if not args.fid_reference:
-            raise ValueError(
-                "Evaluation requires --fid_reference pointing to a reference image directory "
-                "or .npz stats file for pytorch-fid."
             )
         decoder = load_decoder_for_eval(
             args.decoder_checkpoint, device, args.decoder_checkpoint_key,
