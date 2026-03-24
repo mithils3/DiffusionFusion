@@ -33,7 +33,7 @@ main_jit.py \
 --P_mean -0.8 \
 --P_std 0.8 \
 --noise_scale 1.0 \
---batch_size 96 \
+--batch_size 64 \
 --blr 5e-5 \
 --epochs 100 \
 --warmup_epochs 5 \
@@ -45,5 +45,7 @@ main_jit.py \
 --output_dir ${OUTPUT_DIR} \
 --data_path ${IMAGENET_PATH} \
 --online_eval \
+--decoder_checkpoint /work/nvme/bgnp/msalunkhe/outputs/jit_decoder_small_gan_lower_noise/checkpoint-last.pth \
+--decoder_checkpoint_key model_ema \
 --class_num 1000 \
 --eval_freq 25
