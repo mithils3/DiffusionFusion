@@ -22,21 +22,21 @@ source /u/msalunkhe/.venv/bin/activate
 cd /u/msalunkhe/DiffusionFusion/JiT
 git pull
 IMAGENET_PATH="/work/hdd/bgnp/msalunkhe/data/imagenet/"
-OUTPUT_DIR="/work/nvme/bgnp/msalunkhe/outputs/jit_base_patch_size_2_velocity_pred"
+OUTPUT_DIR="/work/nvme/bgnp/msalunkhe/outputs/jit_large_patch_size_2_velocity_pred"
 mkdir -p "${OUTPUT_DIR}"
 OMP_NUM_THREADS=16 torchrun \
 --nproc_per_node=auto \
 --nnodes=1 \
 --node_rank=0 \
 main_jit.py \
---model JiT-B/2-4C \
+--model JiT-L/2-4C \
 --proj_dropout 0.0 \
 --P_mean -0.8 \
 --P_std 0.8 \
 --noise_scale 1.0 \
 --batch_size 64 \
 --blr 5e-5 \
---epochs 100 \
+--epochs 80 \
 --warmup_epochs 5 \
 --gen_bsz 64 \
 --num_images 5000 \
@@ -49,4 +49,4 @@ main_jit.py \
 --decoder_checkpoint /work/nvme/bgnp/msalunkhe/outputs/jit_decoder_small_gan_lower_noise/checkpoint-last.pth \
 --decoder_checkpoint_key model_ema \
 --class_num 1000 \
---eval_freq 25
+--eval_freq 15
