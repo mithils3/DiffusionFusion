@@ -23,8 +23,8 @@ flowchart LR
   C --> PRE
   C --> POST
 
-  DROP --> FINAL["FinalLayer (AdaLN + Linear)<br/>[B,N,p*p*C] e.g. [8,256,768]"]
-  FINAL --> UP["unpatchify<br/>x_pred: [B,C,H,W] e.g. [8,3,256,256]"]
+  DROP --> FINAL["FinalLayer (AdaLN + Linear)<br/>velocity patches [B,N,p*p*C] e.g. [8,256,768]"]
+  FINAL --> UP["unpatchify<br/>v_pred: [B,C,H,W] e.g. [8,3,256,256]"]
 ```
 
 ## Terms
@@ -48,9 +48,9 @@ flowchart LR
 - `RoPE`: rotary positional embedding used inside attention.
 - `JiT block`: transformer block (attention + SwiGLU MLP) with AdaLN modulation from `c`.
 - `AdaLN`: adaptive LayerNorm style modulation (shift/scale/gates generated from `c`).
-- `FinalLayer`: final AdaLN + linear projection from token features to patch pixels.
-- `unpatchify`: reshapes patch outputs back to full image tensor.
-- `x_pred`: predicted denoised image at current step.
+- `FinalLayer`: final AdaLN + linear projection from token features to velocity patches.
+- `unpatchify`: reshapes patch outputs back to full latent/DINO velocity tensors.
+- `v_pred`: predicted velocity at the current step.
 
 ## How To Render
 

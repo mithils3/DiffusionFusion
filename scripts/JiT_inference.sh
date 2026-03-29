@@ -1,3 +1,4 @@
+# Requires a checkpoint saved after the native velocity-prediction migration.
 torchrun --nproc_per_node=auto --nnodes=1 --node_rank=0 \
 main_jit.py \
 --model JiT-B/16  \

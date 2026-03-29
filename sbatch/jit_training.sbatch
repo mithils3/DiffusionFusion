@@ -13,6 +13,7 @@
 
 set -euo pipefail
 
+# Native velocity-prediction JiT training script.
 
 module load python/3.11.9
 module load cuda/12.9.0

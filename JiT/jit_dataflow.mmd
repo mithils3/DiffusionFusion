@@ -18,5 +18,5 @@ flowchart LR
   C --> PRE
   C --> POST
 
-  DROP --> FINAL["FinalLayer (AdaLN + Linear)<br/>[B,N,p*p*C] e.g. [8,256,768]"]
-  FINAL --> UP["unpatchify<br/>x_pred: [B,C,H,W] e.g. [8,3,256,256]"]
+  DROP --> FINAL["FinalLayer (AdaLN + Linear)<br/>velocity patches [B,N,p*p*C] e.g. [8,256,768]"]
+  FINAL --> UP["unpatchify<br/>v_pred: [B,C,H,W] e.g. [8,3,256,256]"]

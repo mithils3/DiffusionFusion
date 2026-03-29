@@ -63,18 +63,16 @@ class Denoiser(nn.Module):
         e_dino = torch.randn_like(dino) * self.noise_scale
         z_latent = t * latent + (1 - t) * e_latent
         z_dino = t * dino + (1 - t) * e_dino
-        v_latent = (latent - z_latent) / (1 - t).clamp_min(self.t_eps)
-        v_dino = (dino - z_dino) / (1 - t).clamp_min(self.t_eps)
+        v_latent_target = (latent - z_latent) / (1 - t).clamp_min(self.t_eps)
+        v_dino_target = (dino - z_dino) / (1 - t).clamp_min(self.t_eps)
 
-        latent_pred, dino_pred = self.net(
+        v_latent_pred, v_dino_pred = self.net(
             z_latent, z_dino, t.flatten(), labels_dropped)
-        v_latent_pred = (latent_pred - z_latent) / \
-            (1 - t).clamp_min(self.t_eps)
-        v_dino_pred = (dino_pred - z_dino) / (1 - t).clamp_min(self.t_eps)
 
-        # l2 loss (separate reduction — streams have different spatial sizes)
-        loss_latent = ((v_latent - v_latent_pred) ** 2).mean()
-        loss_dino = ((v_dino - v_dino_pred) ** 2).mean()
+        # L2 loss on native velocity targets; streams keep separate reductions
+        # because their spatial resolutions differ.
+        loss_latent = ((v_latent_target - v_latent_pred) ** 2).mean()
+        loss_dino = ((v_dino_target - v_dino_pred) ** 2).mean()
         loss = loss_latent + loss_dino
 
         return loss
@@ -113,19 +111,12 @@ class Denoiser(nn.Module):
     @torch.no_grad()
     def _forward_sample(self, z_latent: torch.Tensor, z_dino: torch.Tensor, t: torch.Tensor, labels: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         # conditional
-        latent_cond, dino_cond = self.net(
+        v_latent_cond, v_dino_cond = self.net(
             z_latent, z_dino, t.flatten(), labels)
-        v_latent_cond = (latent_cond - z_latent) / \
-            (1.0 - t).clamp_min(self.t_eps)
-        v_dino_cond = (dino_cond - z_dino) / (1.0 - t).clamp_min(self.t_eps)
 
         # unconditional
-        latent_uncond, dino_uncond = self.net(
+        v_latent_uncond, v_dino_uncond = self.net(
             z_latent, z_dino, t.flatten(), torch.full_like(labels, self.num_classes))
-        v_latent_uncond = (latent_uncond - z_latent) / \
-            (1.0 - t).clamp_min(self.t_eps)
-        v_dino_uncond = (dino_uncond - z_dino) / \
-            (1.0 - t).clamp_min(self.t_eps)
 
         # cfg interval
         low, high = self.cfg_interval

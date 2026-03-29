@@ -320,7 +320,14 @@ def main(args):
                 checkpoint = torch.load(checkpoint_path, map_location='cpu')
         else:
             checkpoint = torch.load(checkpoint_path, map_location='cpu')
-        model_without_ddp.load_state_dict(checkpoint['model'])
+        try:
+            model_without_ddp.load_state_dict(checkpoint['model'])
+        except RuntimeError as exc:
+            raise RuntimeError(
+                "Failed to load JiT checkpoint. This codebase now expects native "
+                "velocity-prediction checkpoints, so older image-prediction "
+                "checkpoints are incompatible."
+            ) from exc
 
         ema_state_dict1 = checkpoint['model_ema1']
         ema_state_dict2 = checkpoint['model_ema2']

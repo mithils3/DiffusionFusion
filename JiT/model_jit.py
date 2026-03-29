@@ -184,7 +184,7 @@ class SwiGLUFFN(nn.Module):
 
 class FinalLayer(nn.Module):
     """
-    The final layer of JiT.
+    Final AdaLN + linear head for latent velocity patches.
     """
 
     def __init__(self, hidden_size, patch_size, out_channels):
@@ -206,7 +206,7 @@ class FinalLayer(nn.Module):
 
 class DinoFinalLayer(nn.Module):
     """
-    The final layer of JiT.
+    Final AdaLN + linear head for DINO velocity tokens.
     """
 
     def __init__(self, hidden_size, dino_hidden_size, out_channels):
@@ -253,7 +253,7 @@ class JiTBlock(nn.Module):
 
 class JiT(nn.Module):
     """
-    Just image Transformer.
+    Just image Transformer with native velocity prediction heads.
     """
 
     def __init__(
@@ -286,6 +286,11 @@ class JiT(nn.Module):
         self.num_classes = num_classes
         self.dino_hidden_size = dino_hidden_size
         self.dino_patches = dino_patches
+        # Persist the prediction contract in checkpoints so older image-head
+        # checkpoints fail fast under strict loading.
+        self.register_buffer(
+            "prediction_target_version", torch.tensor(1, dtype=torch.int32), persistent=True
+        )
 
         # time and class embed
         self.t_embedder = TimestepEmbedder(hidden_size)
@@ -325,10 +330,10 @@ class JiT(nn.Module):
             for i in range(depth)
         ])
 
-        # linear predict
-        self.latent_final_layer = FinalLayer(
+        # Native velocity heads for the latent and DINO streams.
+        self.latent_velocity_head = FinalLayer(
             hidden_size, patch_size, self.out_channels)
-        self.dino_final_layer = DinoFinalLayer(
+        self.dino_velocity_head = DinoFinalLayer(
             hidden_size, dino_hidden_size, self.out_channels)
         self.initialize_weights()
 
@@ -371,20 +376,20 @@ class JiT(nn.Module):
 
         # Zero-out output layers:
         nn.init.constant_(
-            self.latent_final_layer.adaLN_modulation[-1].weight, 0)
-        nn.init.constant_(self.latent_final_layer.adaLN_modulation[-1].bias, 0)
+            self.latent_velocity_head.adaLN_modulation[-1].weight, 0)
+        nn.init.constant_(self.latent_velocity_head.adaLN_modulation[-1].bias, 0)
 
-        nn.init.constant_(self.latent_final_layer.linear.weight, 0)
-        nn.init.constant_(self.latent_final_layer.linear.bias, 0)
-        nn.init.constant_(self.dino_final_layer.linear.weight, 0)
-        nn.init.constant_(self.dino_final_layer.linear.bias, 0)
-        nn.init.constant_(self.dino_final_layer.adaLN_modulation[-1].weight, 0)
-        nn.init.constant_(self.dino_final_layer.adaLN_modulation[-1].bias, 0)
+        nn.init.constant_(self.latent_velocity_head.linear.weight, 0)
+        nn.init.constant_(self.latent_velocity_head.linear.bias, 0)
+        nn.init.constant_(self.dino_velocity_head.linear.weight, 0)
+        nn.init.constant_(self.dino_velocity_head.linear.bias, 0)
+        nn.init.constant_(self.dino_velocity_head.adaLN_modulation[-1].weight, 0)
+        nn.init.constant_(self.dino_velocity_head.adaLN_modulation[-1].bias, 0)
 
     def unpatchify(self, x, p):
         """
         x: (N, T, patch_size**2 * C)
-        imgs: (N, H, W, C)
+        tensor: (N, C, H, W)
         """
         c = self.out_channels
         h = w = int(x.shape[1] ** 0.5)
@@ -397,7 +402,8 @@ class JiT(nn.Module):
 
     def forward(self, latent, dino_features, t, y):
         """
-        x: (N, C, H, W)
+        latent: (N, C, H, W)
+        dino_features: (N, C_dino, H_dino, W_dino)
         t: (N,)
         y: (N,)
         """
@@ -436,14 +442,14 @@ class JiT(nn.Module):
         x = x[:, self.in_context_len:]
         latent, dino_out = x[:, :num_patches], x[:, num_patches:]
 
-        latent = self.latent_final_layer(latent, c)
-        dino_out = self.dino_final_layer(dino_out, c)
-        output = self.unpatchify(latent, self.patch_size)
-        # reshape dino back to spatial: (B, N, C) -> (B, C, H, W)
-        dino_out = dino_out.transpose(1, 2).view(
+        latent_velocity = self.latent_velocity_head(latent, c)
+        dino_velocity = self.dino_velocity_head(dino_out, c)
+        latent_velocity = self.unpatchify(latent_velocity, self.patch_size)
+        # Reshape DINO velocity back to spatial: (B, N, C) -> (B, C, H, W)
+        dino_velocity = dino_velocity.transpose(1, 2).view(
             -1, self.dino_hidden_size, self.dino_patches, self.dino_patches)
 
-        return output, dino_out
+        return latent_velocity, dino_velocity
 
 
 def JiT_B_16(**kwargs):
@@ -520,5 +526,5 @@ if __name__ == "__main__":
     t = torch.tensor([10]).cuda()
     y = torch.tensor([5]).cuda()
     with torch.no_grad():
-        output, dino_out = module(latent, dino, t, y)
-        print(output.shape, dino_out.shape)
+        v_latent, v_dino = module(latent, dino, t, y)
+        print(v_latent.shape, v_dino.shape)
