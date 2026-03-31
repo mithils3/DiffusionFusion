@@ -19,23 +19,52 @@ except ImportError:
     wandb = None
 
 
-def train_one_epoch(model, model_without_ddp, data_loader, optimizer, device, epoch, log_writer=None, args=None, steps_per_epoch: int = None, wandb_run=None):
+def train_one_epoch(
+    model,
+    model_without_ddp,
+    data_loader,
+    optimizer,
+    device,
+    epoch,
+    log_writer=None,
+    args=None,
+    steps_per_epoch: int = None,
+    optimizer_steps_per_epoch: int = None,
+    wandb_run=None,
+):
     model.train(True)
     metric_logger = misc.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', misc.SmoothedValue(
         window_size=1, fmt='{value:.6f}'))
     header = 'Epoch: [{}]'.format(epoch)
     print_freq = 20
+    accum_iter = max(1, int(getattr(args, "accum_iter", 1)))
+    if optimizer_steps_per_epoch is None:
+        optimizer_steps_per_epoch = (
+            steps_per_epoch + accum_iter - 1
+        ) // accum_iter
 
     optimizer.zero_grad(set_to_none=True)
 
     if log_writer is not None:
         print('log_dir: {}'.format(log_writer.log_dir))
 
+    optimizer_step = 0
+    accum_loss = 0.0
+    micro_batches_in_update = 1
+    lr = optimizer.param_groups[0]["lr"]
+
     for data_iter_step, batch in enumerate(metric_logger.log_every(data_loader, print_freq, header, steps_per_epoch)):
-        # per iteration (instead of per epoch) lr scheduler
-        lr_sched.adjust_learning_rate(
-            optimizer, data_iter_step / steps_per_epoch + epoch, args)
+        # Per optimizer step (instead of per micro-batch) lr scheduler so accumulation
+        # matches the reference large-batch JiT training recipe.
+        if data_iter_step % accum_iter == 0:
+            micro_batches_in_update = min(accum_iter, steps_per_epoch - data_iter_step)
+            lr = lr_sched.adjust_learning_rate(
+                optimizer,
+                optimizer_step / optimizer_steps_per_epoch + epoch,
+                args,
+            )
+            accum_loss = 0.0
 
         # normalize image to [-1, 1]
         latent = batch["latent"].to(device, non_blocking=True)
@@ -49,33 +78,47 @@ def train_one_epoch(model, model_without_ddp, data_loader, optimizer, device, ep
             print("Loss is {}, stopping training".format(loss_value))
             sys.exit(1)
 
-        optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        optimizer.step()
+        accum_loss += loss_value
+        (loss / micro_batches_in_update).backward()
 
+        should_step = (
+            (data_iter_step + 1) % accum_iter == 0
+            or data_iter_step + 1 == steps_per_epoch
+        )
+        if not should_step:
+            continue
+
+        optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
         model_without_ddp.update_ema()
 
-        metric_logger.update(loss=loss_value)
-        lr = optimizer.param_groups[0]["lr"]
+        optimizer_step += 1
+        step_loss = accum_loss / micro_batches_in_update
+        metric_logger.update(loss=step_loss)
         metric_logger.update(lr=lr)
 
-        loss_value_reduce = misc.all_reduce_mean(loss_value)
+        loss_value_reduce = misc.all_reduce_mean(step_loss)
 
         if log_writer is not None:
             # Use epoch_1000x as the x-axis in TensorBoard to calibrate curves.
             epoch_1000x = int(
-                (data_iter_step / steps_per_epoch + epoch) * 1000)
-            if data_iter_step % args.log_freq == 0:
+                (epoch + optimizer_step / optimizer_steps_per_epoch) * 1000
+            )
+            if (optimizer_step - 1) % args.log_freq == 0:
                 log_writer.add_scalar(
                     'train_loss', loss_value_reduce, epoch_1000x)
                 log_writer.add_scalar('lr', lr, epoch_1000x)
-        if wandb_run is not None and data_iter_step % args.log_freq == 0:
-            global_step = epoch * steps_per_epoch + data_iter_step
+        if wandb_run is not None and (optimizer_step - 1) % args.log_freq == 0:
+            global_step = epoch * optimizer_steps_per_epoch + (optimizer_step - 1)
             wandb_run.log({
                 "train/loss": loss_value_reduce,
                 "train/lr": lr,
-                "train/epoch_progress": epoch + data_iter_step / steps_per_epoch,
+                "train/epoch_progress": epoch + optimizer_step / optimizer_steps_per_epoch,
             }, step=global_step)
+    if optimizer_step != optimizer_steps_per_epoch:
+        raise RuntimeError(
+            f"Expected {optimizer_steps_per_epoch} optimizer steps, got {optimizer_step}."
+        )
     print(f"Finished ")
 
 
@@ -84,7 +127,8 @@ def evaluate(model_without_ddp, args, epoch, decoder, batch_size=64, log_writer=
     model_without_ddp.eval()
     world_size = misc.get_world_size()
     local_rank = misc.get_rank()
-    num_steps = args.num_images // (batch_size * world_size) + 1
+    global_batch_size = batch_size * world_size
+    num_steps = math.ceil(args.num_images / global_batch_size)
     eval_image_interval = max(1, getattr(
         args, "wandb_eval_image_interval", 10))
     wandb_table = None
@@ -122,17 +166,17 @@ def evaluate(model_without_ddp, args, epoch, decoder, batch_size=64, log_writer=
     class_num = args.class_num
     assert args.num_images % class_num == 0, "Number of images per class must be the same"
     class_label_gen_world = np.arange(
-        0, class_num).repeat(args.num_images // class_num)
-    class_label_gen_world = np.hstack([class_label_gen_world, np.zeros(50000)])
+        0, class_num, dtype=np.int64).repeat(args.num_images // class_num)
 
     for step_idx in range(num_steps):
         print("Generation step {}/{}".format(step_idx, num_steps))
 
         start_idx = world_size * batch_size * step_idx + local_rank * batch_size
         end_idx = start_idx + batch_size
-        labels_gen = class_label_gen_world[start_idx:end_idx]
-        labels_gen_np = labels_gen.copy()
-        labels_gen = torch.Tensor(labels_gen).long().cuda()
+        labels_gen_np = class_label_gen_world[start_idx:min(end_idx, args.num_images)].copy()
+        labels_gen = np.zeros(batch_size, dtype=np.int64)
+        labels_gen[:labels_gen_np.shape[0]] = labels_gen_np
+        labels_gen = torch.from_numpy(labels_gen).long().cuda()
 
         with torch.amp.autocast('cuda', dtype=torch.bfloat16):
             sampled_latents, sampled_dino = model_without_ddp.generate(
@@ -180,12 +224,10 @@ def evaluate(model_without_ddp, args, epoch, decoder, batch_size=64, log_writer=
         torch.distributed.barrier()
 
     if metrics_requested and misc.is_main_process():
-
-        fid_statistics_file = '/work/nvme/betw/msalunkhe/data/jit_in256_stats.npz'
         metrics_dict = torch_fidelity.calculate_metrics(
             input1=save_folder,
             input2=None,
-            fid_statistics_file=fid_statistics_file,
+            fid_statistics_file=args.fid_stats_path,
             cuda=True,
             isc=True,
             fid=True,

@@ -23,6 +23,9 @@ cd /u/msalunkhe/DiffusionFusion/JiT
 git pull
 IMAGENET_PATH="/work/hdd/bgnp/msalunkhe/data/imagenet/"
 OUTPUT_DIR="/work/nvme/bgnp/msalunkhe/outputs/jit_large_patch_size_2_velocity_pred"
+FID_STATS_PATH="${FID_STATS_PATH:-/u/msalunkhe/DiffusionFusion/JiT/fid_stats/jit_in256_stats.npz}"
+NUM_IMAGES="${NUM_IMAGES:-5000}"
+EVAL_FREQ="${EVAL_FREQ:-15}"
 mkdir -p "${OUTPUT_DIR}"
 OMP_NUM_THREADS=16 torchrun \
 --nproc_per_node=auto \
@@ -35,18 +38,20 @@ main_jit.py \
 --P_std 0.8 \
 --noise_scale 1.0 \
 --batch_size 64 \
+--accum_iter 4 \
 --blr 5e-5 \
 --epochs 80 \
 --warmup_epochs 5 \
 --gen_bsz 64 \
---num_images 5000 \
+--num_images "${NUM_IMAGES}" \
 --cfg 2.9 \
 --interval_min 0.1 \
 --interval_max 1.0 \
 --output_dir ${OUTPUT_DIR} \
 --data_path ${IMAGENET_PATH} \
 --online_eval \
+--fid_stats_path "${FID_STATS_PATH}" \
 --decoder_checkpoint /work/nvme/bgnp/msalunkhe/outputs/jit_decoder_small_gan_lower_noise/checkpoint-last.pth \
 --decoder_checkpoint_key model_ema \
 --class_num 1000 \
---eval_freq 15
+--eval_freq "${EVAL_FREQ}"

@@ -25,6 +25,17 @@ torch.backends.cudnn.allow_tf32 = True
 torch.backends.cudnn.benchmark = True
 
 
+_FID_STATS_DIR = Path(__file__).resolve().parent / "fid_stats"
+
+
+def resolve_default_fid_stats_path(latent_size: int) -> str | None:
+    image_size = latent_size * 8
+    candidate = _FID_STATS_DIR / f"jit_in{image_size}_stats.npz"
+    if candidate.is_file():
+        return str(candidate)
+    return None
+
+
 def get_args_parser():
     parser = argparse.ArgumentParser('JiT', add_help=False)
 
@@ -52,11 +63,13 @@ def get_args_parser():
     parser.add_argument('--warmup_epochs', type=int, default=5, metavar='N',
                         help='Epochs to warm up LR')
     parser.add_argument('--batch_size', default=128, type=int,
-                        help='Batch size per GPU (effective batch size = batch_size * # GPUs)')
+                        help='Batch size per GPU before gradient accumulation')
+    parser.add_argument('--accum_iter', default=1, type=int,
+                        help='Number of micro-batches to accumulate before each optimizer step')
     parser.add_argument('--lr', type=float, default=None, metavar='LR',
                         help='Learning rate (absolute)')
     parser.add_argument('--blr', type=float, default=5e-5, metavar='LR',
-                        help='Base learning rate: absolute_lr = base_lr * total_batch_size / 256')
+                        help='Base learning rate: absolute_lr = base_lr * effective_batch_size / 256')
     parser.add_argument('--min_lr', type=float, default=0., metavar='LR',
                         help='Minimum LR for cyclic schedulers that hit 0')
     parser.add_argument('--lr_schedule', type=str, default='constant',
@@ -121,6 +134,12 @@ def get_args_parser():
     parser.add_argument('--evaluate_gen', action='store_true')
     parser.add_argument('--gen_bsz', type=int, default=256,
                         help='Generation batch size')
+    parser.add_argument(
+        '--fid_stats_path',
+        type=str,
+        default=None,
+        help='Path to a torch-fidelity FID statistics .npz file used for online evaluation.',
+    )
 
     # dataset
     parser.add_argument('--data_path', default='./data/imagenet', type=str,
@@ -176,6 +195,9 @@ def main(args):
     print("Arguments:\n{}".format(args).replace(', ', ',\n'))
 
     device = torch.device(args.device)
+
+    if args.accum_iter < 1:
+        raise ValueError("--accum_iter must be at least 1.")
 
     # Set seeds for reproducibility
     seed = args.seed + misc.get_rank()
@@ -256,6 +278,12 @@ def main(args):
             f"(samples/rank={plan['num_samples_per_rank']}, "
             f"dropped_tail_per_rank={plan['dropped_samples_per_rank']})."
         )
+        optimizer_updates = (plan['num_batches'] + args.accum_iter - 1) // args.accum_iter
+        print(
+            "Gradient accumulation: "
+            f"{args.accum_iter} micro-batches/update "
+            f"-> {optimizer_updates} optimizer updates per rank in epoch 0."
+        )
 
     torch._dynamo.config.cache_size_limit = 128
     torch._dynamo.config.optimize_ddp = False
@@ -273,6 +301,18 @@ def main(args):
     decoder = None
     needs_eval = args.online_eval or args.evaluate_gen
     if needs_eval:
+        if args.fid_stats_path is None:
+            args.fid_stats_path = resolve_default_fid_stats_path(args.latent_size)
+        if args.fid_stats_path is None:
+            raise FileNotFoundError(
+                "Evaluation requires --fid_stats_path, and no built-in FID stats file was found "
+                f"for latent_size={args.latent_size} under {_FID_STATS_DIR}."
+            )
+        args.fid_stats_path = str(Path(args.fid_stats_path).expanduser().resolve())
+        if not os.path.isfile(args.fid_stats_path):
+            raise FileNotFoundError(
+                f"FID statistics file not found: {args.fid_stats_path}"
+            )
         if not args.decoder_checkpoint:
             raise ValueError(
                 "Evaluation requires --decoder_checkpoint pointing to a trained decoder."
@@ -282,12 +322,13 @@ def main(args):
         )
         print(f"Rank {global_rank}: loaded decoder from {args.decoder_checkpoint}")
 
-    eff_batch_size = args.batch_size * misc.get_world_size()
+    eff_batch_size = args.batch_size * args.accum_iter * misc.get_world_size()
     if args.lr is None:  # only base_lr (blr) is specified
         args.lr = args.blr * eff_batch_size / 256
 
     print("Base lr: {:.2e}".format(args.lr * 256 / eff_batch_size))
     print("Actual lr: {:.2e}".format(args.lr))
+    print("Gradient accumulation steps: %d" % args.accum_iter)
     print("Effective batch size: %d" % eff_batch_size)
 
     model = torch.nn.parallel.DistributedDataParallel(
@@ -324,8 +365,8 @@ def main(args):
             model_without_ddp.load_state_dict(checkpoint['model'])
         except RuntimeError as exc:
             raise RuntimeError(
-                "Failed to load JiT checkpoint. This codebase now expects native "
-                "velocity-prediction checkpoints, so older image-prediction "
+                "Failed to load JiT checkpoint. This codebase now expects "
+                "image-prediction checkpoints, so native velocity-prediction "
                 "checkpoints are incompatible."
             ) from exc
 
@@ -375,6 +416,9 @@ def main(args):
             steps_per_epoch = len(data_loader_train)
             if steps_per_epoch <= 0:
                 raise RuntimeError("Training dataloader has zero steps for this epoch.")
+            optimizer_steps_per_epoch = (
+                steps_per_epoch + args.accum_iter - 1
+            ) // args.accum_iter
 
             train_one_epoch(
                 compiled_model,
@@ -386,6 +430,7 @@ def main(args):
                 log_writer=log_writer,
                 args=args,
                 steps_per_epoch=steps_per_epoch,
+                optimizer_steps_per_epoch=optimizer_steps_per_epoch,
                 wandb_run=wandb_run,
             )
 
