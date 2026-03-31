@@ -26,6 +26,7 @@ IMAGENET_PATH="${IMAGENET_PATH:-/work/hdd/bgnp/msalunkhe/data/imagenet/}"
 OUTPUT_DIR="${OUTPUT_DIR:-/work/nvme/bgnp/msalunkhe/outputs/jit_base_patch_size_2_dino_latent_large_hidden_size}"
 RESUME_DIR="${RESUME_DIR:-${OUTPUT_DIR}}"
 DECODER_CHECKPOINT="${DECODER_CHECKPOINT:-/work/nvme/bgnp/msalunkhe/outputs/jit_decoder_small_gan_lower_noise/checkpoint-last.pth}"
+FID_STATS_PATH="${FID_STATS_PATH:-/u/msalunkhe/DiffusionFusion/JiT/fid_stats/jit_in256_stats.npz}"
 
 MODEL="${MODEL:-JiT-B/2-4C}"
 BATCH_SIZE="${BATCH_SIZE:-64}"
@@ -68,6 +69,7 @@ OMP_NUM_THREADS=16 torchrun \
   --resume "${RESUME_DIR}" \
   --data_path "${IMAGENET_PATH}" \
   --evaluate_gen \
+  --fid_stats_path "${FID_STATS_PATH}" \
   --decoder_checkpoint "${DECODER_CHECKPOINT}" \
   --decoder_checkpoint_key model_ema \
   --class_num "${CLASS_NUM}"

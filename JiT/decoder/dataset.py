@@ -14,7 +14,6 @@ import torch.distributed as dist
 from datasets import load_dataset, load_from_disk
 from torch.utils.data import IterableDataset
 
-from JiT.util.feature_normalization import normalize_feature_map_tokens
 from JiT.util.image_transforms import build_center_crop_normalize_transform
 
 
@@ -512,10 +511,11 @@ class RamLoadedShardDataset(IterableDataset):
         }
 
     def _format_batch(self, rows: Dict[str, np.ndarray]) -> Dict[str, torch.Tensor]:
-        dino = normalize_feature_map_tokens(torch.from_numpy(rows["dino"]))
         return {
             "latent": torch.from_numpy(rows["latent"]),
-            "dino": dino,
+            # DINO features are normalized once during extraction.
+            # Repeating layer norm here silently changes float16 shards.
+            "dino": torch.from_numpy(rows["dino"]),
             "y": torch.from_numpy(rows["y"]),
             "sample_id": torch.from_numpy(rows["sample_id"]),
             "image": self.image_store.load_batch(rows["sample_id"]),

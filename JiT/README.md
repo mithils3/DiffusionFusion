@@ -20,8 +20,6 @@ This is a PyTorch/GPU re-implementation of the paper [Back to Basics: Let Denois
 
 JiT adopts a minimalist and self-contained design for pixel-level high-resolution image diffusion. 
 The original implementation was in JAX+TPU. This re-implementation is in PyTorch+GPU.
-This fork trains and samples JiT as a native velocity-prediction model, so
-checkpoints saved before the velocity-head change are not compatible.
 
 <p align="center">
   <img src="demo/jit.jpg" width="40%">

@@ -13,9 +13,6 @@ import torch.distributed as dist
 from datasets import load_from_disk
 from torch.utils.data import IterableDataset
 
-from JiT.util.feature_normalization import normalize_dino_feature_map_tokens
-
-
 def resolve_feature_dataset_root(data_path: str, dataset_dir_name: str) -> str:
     if os.path.isdir(dataset_dir_name):
         return dataset_dir_name
@@ -462,12 +459,11 @@ class RamLoadedShardDataset(IterableDataset):
                     }
                     cursor = take
                     if carry_batch["y"].shape[0] == self.batch_size:
-                        dino = normalize_dino_feature_map_tokens(
-                            torch.from_numpy(carry_batch["dino"])
-                        )
                         yield {
                             "latent": torch.from_numpy(carry_batch["latent"]),
-                            "dino": dino,
+                            # DINO features are normalized once during extraction.
+                            # Repeating layer norm here silently changes float16 shards.
+                            "dino": torch.from_numpy(carry_batch["dino"]),
                             "y": torch.from_numpy(carry_batch["y"]),
                         }
                         emitted_samples += self.batch_size
@@ -478,12 +474,11 @@ class RamLoadedShardDataset(IterableDataset):
                     and emitted_samples + self.batch_size <= target_samples
                 ):
                     batch_slice = slice(cursor, cursor + self.batch_size)
-                    dino = normalize_dino_feature_map_tokens(
-                        torch.from_numpy(shard_rows["dino"][batch_slice])
-                    )
                     yield {
                         "latent": torch.from_numpy(shard_rows["latent"][batch_slice]),
-                        "dino": dino,
+                        # DINO features are normalized once during extraction.
+                        # Repeating layer norm here silently changes float16 shards.
+                        "dino": torch.from_numpy(shard_rows["dino"][batch_slice]),
                         "y": torch.from_numpy(shard_rows["y"][batch_slice]),
                     }
                     emitted_samples += self.batch_size
