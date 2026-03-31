@@ -32,7 +32,7 @@ OMP_NUM_THREADS=16 torchrun \
 --nnodes=1 \
 --node_rank=0 \
 main_jit.py \
---model JiT-L/2-4C \
+--model JiT-B/2-4C \
 --proj_dropout 0.0 \
 --P_mean -0.8 \
 --P_std 0.8 \
