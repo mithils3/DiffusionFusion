@@ -22,10 +22,10 @@ source /u/msalunkhe/.venv/bin/activate
 cd /u/msalunkhe/DiffusionFusion/JiT
 git pull
 IMAGENET_PATH="/work/hdd/bgnp/msalunkhe/data/imagenet/"
-OUTPUT_DIR="/work/nvme/bgnp/msalunkhe/outputs/jit_large_patch_size_2_velocity_pred"
+OUTPUT_DIR="/work/nvme/bgnp/msalunkhe/outputs/jit_base_patch_size_2_higher_lr"
 FID_STATS_PATH="${FID_STATS_PATH:-/u/msalunkhe/DiffusionFusion/JiT/fid_stats/jit_in256_stats.npz}"
 NUM_IMAGES="${NUM_IMAGES:-5000}"
-EVAL_FREQ="${EVAL_FREQ:-15}"
+EVAL_FREQ="${EVAL_FREQ:-20}"
 mkdir -p "${OUTPUT_DIR}"
 OMP_NUM_THREADS=16 torchrun \
 --nproc_per_node=auto \
