@@ -115,11 +115,15 @@ def scaled_dot_product_attention(query, key, value, dropout_p=0.0) -> torch.Tens
 class Attention(nn.Module):
     def __init__(self, dim, num_heads=8, qkv_bias=True, qk_norm=True, attn_drop=0., proj_drop=0.):
         super().__init__()
+        if dim % num_heads != 0:
+            raise ValueError(
+                f"Attention dim ({dim}) must be divisible by num_heads ({num_heads})."
+            )
         self.num_heads = num_heads
-        head_dim = dim // num_heads
+        self.head_dim = dim // num_heads
 
-        self.q_norm = RMSNorm(head_dim) if qk_norm else nn.Identity()
-        self.k_norm = RMSNorm(head_dim) if qk_norm else nn.Identity()
+        self.q_norm = RMSNorm(self.head_dim) if qk_norm else nn.Identity()
+        self.k_norm = RMSNorm(self.head_dim) if qk_norm else nn.Identity()
 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         self.attn_drop = nn.Dropout(attn_drop)
@@ -128,8 +132,7 @@ class Attention(nn.Module):
 
     def forward(self, x, rope, num_patches):
         B, N, C = x.shape
-        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C //
-                                  self.num_heads).permute(2, 0, 3, 1, 4)
+        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
 
         q = self.q_norm(q)
@@ -275,6 +278,15 @@ class JiT(nn.Module):
         dino_patches=16,
     ):
         super().__init__()
+        if hidden_size % num_heads != 0:
+            raise ValueError(
+                f"JiT hidden_size ({hidden_size}) must be divisible by num_heads ({num_heads})."
+            )
+        head_dim = hidden_size // num_heads
+        if head_dim % 2 != 0:
+            raise ValueError(
+                f"JiT attention head dimension ({head_dim}) must be even for rotary embeddings."
+            )
         self.in_channels = in_channels
         self.out_channels = in_channels
         self.patch_size = patch_size
@@ -308,7 +320,7 @@ class JiT(nn.Module):
             torch.nn.init.normal_(self.in_context_posemb, std=.02)
 
         # rope
-        half_head_dim = hidden_size // num_heads // 2
+        half_head_dim = head_dim // 2
         hw_seq_len = input_size // patch_size
         self.feat_rope = VisionRotaryEmbeddingFast(
             dim=half_head_dim,
@@ -454,7 +466,7 @@ def JiT_B_16(**kwargs):
 def JiT_B_2_4C(**kwargs):
     kwargs.setdefault("input_size", 32)
     kwargs.setdefault("in_channels", 4)
-    return JiT(depth=12, hidden_size=1024, num_heads=24,
+    return JiT(depth=12, hidden_size=1024, num_heads=16,
                bottleneck_dim=128, in_context_len=32, in_context_start=4, patch_size=2, **kwargs)
 
 
