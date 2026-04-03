@@ -19,6 +19,52 @@ except ImportError:
     wandb = None
 
 
+def _iter_accumulation_groups(iterable, accum_iter: int, total_micro_batches: int):
+    if accum_iter < 1:
+        raise ValueError("accum_iter must be at least 1.")
+    if total_micro_batches < 0:
+        raise ValueError("total_micro_batches must be non-negative.")
+    iterator = iter(iterable)
+    emitted_micro_batches = 0
+
+    while emitted_micro_batches < total_micro_batches:
+        micro_batches_in_update = min(
+            accum_iter, total_micro_batches - emitted_micro_batches
+        )
+        try:
+            first_batch = next(iterator)
+        except StopIteration as exc:
+            raise RuntimeError(
+                f"Expected {total_micro_batches} micro-batches, consumed {emitted_micro_batches}."
+            ) from exc
+
+        def group_batches(
+            first_batch=first_batch,
+            remaining=micro_batches_in_update - 1,
+            emitted_before_group=emitted_micro_batches,
+        ):
+            yield first_batch
+            for consumed_in_group in range(remaining):
+                try:
+                    yield next(iterator)
+                except StopIteration as exc:
+                    raise RuntimeError(
+                        f"Expected {total_micro_batches} micro-batches, consumed "
+                        f"{emitted_before_group + 1 + consumed_in_group}."
+                    ) from exc
+
+        emitted_micro_batches += micro_batches_in_update
+        yield group_batches(), micro_batches_in_update
+
+    try:
+        next(iterator)
+    except StopIteration:
+        return
+    raise RuntimeError(
+        f"Expected {total_micro_batches} micro-batches, but data loader yielded extra batches."
+    )
+
+
 def train_one_epoch(
     model,
     model_without_ddp,
@@ -39,85 +85,86 @@ def train_one_epoch(
     header = 'Epoch: [{}]'.format(epoch)
     print_freq = 20
     accum_iter = max(1, int(getattr(args, "accum_iter", 1)))
+    if steps_per_epoch is None or steps_per_epoch <= 0:
+        raise ValueError("steps_per_epoch must be a positive integer.")
     if optimizer_steps_per_epoch is None:
         optimizer_steps_per_epoch = (
             steps_per_epoch + accum_iter - 1
         ) // accum_iter
+    if optimizer_steps_per_epoch <= 0:
+        raise ValueError("optimizer_steps_per_epoch must be a positive integer.")
 
     optimizer.zero_grad(set_to_none=True)
 
     if log_writer is not None:
         print('log_dir: {}'.format(log_writer.log_dir))
 
-    optimizer_step = 0
-    accum_loss = 0.0
-    micro_batches_in_update = 1
-    lr = optimizer.param_groups[0]["lr"]
+    optimizer_steps_completed = 0
 
-    for data_iter_step, batch in enumerate(metric_logger.log_every(data_loader, print_freq, header, steps_per_epoch)):
+    for optimizer_step, (micro_batches, micro_batches_in_update) in enumerate(
+        metric_logger.log_every(
+            _iter_accumulation_groups(data_loader, accum_iter, steps_per_epoch),
+            print_freq,
+            header,
+            optimizer_steps_per_epoch,
+        )
+    ):
         # Per optimizer step (instead of per micro-batch) lr scheduler so accumulation
         # matches the reference large-batch JiT training recipe.
-        if data_iter_step % accum_iter == 0:
-            micro_batches_in_update = min(accum_iter, steps_per_epoch - data_iter_step)
-            lr = lr_sched.adjust_learning_rate(
-                optimizer,
-                optimizer_step / optimizer_steps_per_epoch + epoch,
-                args,
-            )
-            accum_loss = 0.0
-
-        # normalize image to [-1, 1]
-        latent = batch["latent"].to(device, non_blocking=True)
-        dino = batch["dino"].to(device, non_blocking=True)
-        labels = batch["y"].to(device, non_blocking=True).view(-1).long()
-        with torch.autocast('cuda', dtype=torch.bfloat16):
-            loss = model(latent, dino, labels)
-
-        loss_value = loss.item()
-        if not math.isfinite(loss_value):
-            print("Loss is {}, stopping training".format(loss_value))
-            sys.exit(1)
-
-        accum_loss += loss_value
-        (loss / micro_batches_in_update).backward()
-
-        should_step = (
-            (data_iter_step + 1) % accum_iter == 0
-            or data_iter_step + 1 == steps_per_epoch
+        lr = lr_sched.adjust_learning_rate(
+            optimizer,
+            optimizer_step / optimizer_steps_per_epoch + epoch,
+            args,
         )
-        if not should_step:
-            continue
+        accum_loss = 0.0
+
+        for batch in micro_batches:
+            # normalize image to [-1, 1]
+            latent = batch["latent"].to(device, non_blocking=True)
+            dino = batch["dino"].to(device, non_blocking=True)
+            labels = batch["y"].to(device, non_blocking=True).view(-1).long()
+            with torch.autocast('cuda', dtype=torch.bfloat16):
+                loss = model(latent, dino, labels)
+
+            loss_value = loss.item()
+            if not math.isfinite(loss_value):
+                print("Loss is {}, stopping training".format(loss_value))
+                sys.exit(1)
+
+            accum_loss += loss_value
+            (loss / micro_batches_in_update).backward()
 
         optimizer.step()
         optimizer.zero_grad(set_to_none=True)
         model_without_ddp.update_ema()
 
-        optimizer_step += 1
         step_loss = accum_loss / micro_batches_in_update
         metric_logger.update(loss=step_loss)
         metric_logger.update(lr=lr)
 
         loss_value_reduce = misc.all_reduce_mean(step_loss)
+        completed_optimizer_steps = optimizer_step + 1
+        optimizer_steps_completed = completed_optimizer_steps
 
         if log_writer is not None:
             # Use epoch_1000x as the x-axis in TensorBoard to calibrate curves.
             epoch_1000x = int(
-                (epoch + optimizer_step / optimizer_steps_per_epoch) * 1000
+                (epoch + completed_optimizer_steps / optimizer_steps_per_epoch) * 1000
             )
-            if (optimizer_step - 1) % args.log_freq == 0:
+            if optimizer_step % args.log_freq == 0:
                 log_writer.add_scalar(
                     'train_loss', loss_value_reduce, epoch_1000x)
                 log_writer.add_scalar('lr', lr, epoch_1000x)
-        if wandb_run is not None and (optimizer_step - 1) % args.log_freq == 0:
-            global_step = epoch * optimizer_steps_per_epoch + (optimizer_step - 1)
+        if wandb_run is not None and optimizer_step % args.log_freq == 0:
+            global_step = epoch * optimizer_steps_per_epoch + optimizer_step
             wandb_run.log({
                 "train/loss": loss_value_reduce,
                 "train/lr": lr,
-                "train/epoch_progress": epoch + optimizer_step / optimizer_steps_per_epoch,
+                "train/epoch_progress": epoch + completed_optimizer_steps / optimizer_steps_per_epoch,
             }, step=global_step)
-    if optimizer_step != optimizer_steps_per_epoch:
+    if optimizer_steps_completed != optimizer_steps_per_epoch:
         raise RuntimeError(
-            f"Expected {optimizer_steps_per_epoch} optimizer steps, got {optimizer_step}."
+            f"Expected {optimizer_steps_per_epoch} optimizer steps, got {optimizer_steps_completed}."
         )
     print(f"Finished ")
 
