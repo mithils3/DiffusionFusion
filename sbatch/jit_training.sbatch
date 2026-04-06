@@ -20,7 +20,6 @@ module load cuda/12.9.0
 
 source /u/msalunkhe/.venv/bin/activate
 cd /u/msalunkhe/DiffusionFusion/JiT
-git pull
 IMAGENET_PATH="/work/hdd/bgnp/msalunkhe/data/imagenet/"
 OUTPUT_DIR="/work/nvme/bgnp/msalunkhe/outputs/jit_base_patch_size_2_higher_lr"
 FID_STATS_PATH="${FID_STATS_PATH:-/u/msalunkhe/DiffusionFusion/JiT/fid_stats/jit_in256_stats.npz}"
