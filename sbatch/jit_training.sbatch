@@ -10,6 +10,8 @@
 #SBATCH --time=48:00:00
 #SBATCH -o slurm-%j.out
 #SBATCH -e slurm-%j.err
+#SBATCH --mail-user=mithils3@illinois.edu
+#SBATCH --mail-type=BEGIN,END,FAIL
 
 set -euo pipefail
 
