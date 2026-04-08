@@ -306,3 +306,20 @@ def all_reduce_mean(x):
         return x_reduce.item()
     else:
         return x
+
+
+def configure_wandb_step_metrics(wandb_run):
+    if wandb_run is None or not hasattr(wandb_run, "define_metric"):
+        return
+    wandb_run.define_metric("trainer/global_step")
+    for metric_pattern in ("train/*", "eval/*"):
+        wandb_run.define_metric(
+            metric_pattern,
+            step_metric="trainer/global_step",
+        )
+
+
+def add_wandb_global_step(payload, global_step):
+    if global_step is not None:
+        payload["trainer/global_step"] = int(global_step)
+    return payload

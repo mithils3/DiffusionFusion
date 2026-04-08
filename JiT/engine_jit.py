@@ -157,11 +157,13 @@ def train_one_epoch(
                 log_writer.add_scalar('lr', lr, epoch_1000x)
         if wandb_run is not None and optimizer_step % args.log_freq == 0:
             global_step = epoch * optimizer_steps_per_epoch + optimizer_step
-            wandb_run.log({
+            payload = {
                 "train/loss": loss_value_reduce,
                 "train/lr": lr,
                 "train/epoch_progress": epoch + completed_optimizer_steps / optimizer_steps_per_epoch,
-            }, step=global_step)
+            }
+            misc.add_wandb_global_step(payload, global_step)
+            wandb_run.log(payload)
     if optimizer_steps_completed != optimizer_steps_per_epoch:
         raise RuntimeError(
             f"Expected {optimizer_steps_per_epoch} optimizer steps, got {optimizer_steps_completed}."
@@ -297,10 +299,8 @@ def evaluate(model_without_ddp, args, epoch, decoder, batch_size=64, log_writer=
             }
             if wandb_table is not None and len(wandb_table.data) > 0:
                 log_payload['eval/samples{}'.format(postfix)] = wandb_table
-            if wandb_step is None:
-                wandb_run.log(log_payload)
-            else:
-                wandb_run.log(log_payload, step=wandb_step)
+            misc.add_wandb_global_step(log_payload, wandb_step)
+            wandb_run.log(log_payload)
         print("FID: {:.4f}, Inception Score: {:.4f}".format(
             fid, inception_score))
         with open(metrics_done_path, "w", encoding="utf-8") as f:

@@ -229,6 +229,7 @@ def main(args):
             dir=args.output_dir if args.output_dir else None,
             mode=args.wandb_mode,
         )
+        misc.configure_wandb_step_metrics(wandb_run)
 
     latent_store = inspect_feature_shards(args.data_path, args.latent_dir_name)
     dino_store = inspect_feature_shards(args.data_path, args.dino_dir_name)
@@ -248,6 +249,12 @@ def main(args):
         num_workers=0,
         pin_memory=args.pin_mem,
     )
+    initial_steps_per_epoch = len(data_loader_train)
+    if initial_steps_per_epoch <= 0:
+        raise RuntimeError("Training dataloader has zero steps for this epoch.")
+    initial_optimizer_steps_per_epoch = (
+        initial_steps_per_epoch + args.accum_iter - 1
+    ) // args.accum_iter
     epoch_control = dataset_train
 
     if global_rank == 0:
@@ -391,6 +398,7 @@ def main(args):
         print("Training from scratch")
 
     try:
+        wandb_epoch_end_step = args.start_epoch * initial_optimizer_steps_per_epoch
         # Evaluate generation
         if args.evaluate_gen:
             print("Evaluating checkpoint at {} epoch".format(args.start_epoch))
@@ -400,11 +408,12 @@ def main(args):
                     evaluate(
                         model_without_ddp,
                         args,
-                        0,
+                        args.start_epoch,
                         batch_size=args.gen_bsz,
                         log_writer=log_writer,
                         decoder=decoder,
                         wandb_run=wandb_run,
+                        wandb_step=wandb_epoch_end_step,
                     )
             return
 
@@ -419,6 +428,7 @@ def main(args):
             optimizer_steps_per_epoch = (
                 steps_per_epoch + args.accum_iter - 1
             ) // args.accum_iter
+            wandb_epoch_end_step = (epoch + 1) * optimizer_steps_per_epoch
 
             train_one_epoch(
                 compiled_model,
@@ -471,7 +481,7 @@ def main(args):
                         log_writer=log_writer,
                         decoder=decoder,
                         wandb_run=wandb_run,
-                        wandb_step=(epoch + 1) * steps_per_epoch,
+                        wandb_step=wandb_epoch_end_step,
                     )
                 torch.cuda.empty_cache()
 
@@ -482,10 +492,12 @@ def main(args):
         total_time_str = str(datetime.timedelta(seconds=int(total_time)))
         print('Training time:', total_time_str)
         if wandb_run is not None:
-            wandb_run.log({
+            payload = {
                 "train/total_time_sec": total_time,
                 "train/total_time_hms": total_time_str,
-            })
+            }
+            misc.add_wandb_global_step(payload, wandb_epoch_end_step)
+            wandb_run.log(payload)
     finally:
         if log_writer is not None:
             log_writer.close()
