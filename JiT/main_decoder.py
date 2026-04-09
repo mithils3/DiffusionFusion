@@ -562,6 +562,7 @@ def main(args: argparse.Namespace) -> None:
             dir=args.output_dir if args.output_dir else None,
             mode=args.wandb_mode,
         )
+        misc.configure_wandb_step_metrics(wandb_run)
 
     latent_store = inspect_feature_shards(args.data_path, args.latent_dir_name)
     dino_store = inspect_feature_shards(args.data_path, args.dino_dir_name)
@@ -597,6 +598,9 @@ def main(args: argparse.Namespace) -> None:
         image_size=args.decoder_output_image_size,
         pin_mem=args.pin_mem,
     )
+    initial_steps_per_epoch = len(data_loader_train)
+    if initial_steps_per_epoch <= 0:
+        raise RuntimeError("Decoder dataloader has zero steps for this epoch.")
 
     if global_rank == 0:
         describe_dataset_plan(
@@ -642,6 +646,7 @@ def main(args: argparse.Namespace) -> None:
     maybe_resume_checkpoint(args, model_without_ddp, optimizer, ema_model)
 
     try:
+        wandb_epoch_end_step = args.start_epoch * initial_steps_per_epoch
         if args.evaluate_only:
             print("Evaluating decoder checkpoint at epoch", args.start_epoch)
             with torch.no_grad():
@@ -652,6 +657,7 @@ def main(args: argparse.Namespace) -> None:
                     data_loader=data_loader_eval,
                     log_writer=log_writer,
                     wandb_run=wandb_run,
+                    wandb_step=wandb_epoch_end_step,
                 )
             return
 
@@ -662,6 +668,7 @@ def main(args: argparse.Namespace) -> None:
             steps_per_epoch = len(data_loader_train)
             if steps_per_epoch <= 0:
                 raise RuntimeError("Decoder dataloader has zero steps for this epoch.")
+            wandb_epoch_end_step = (epoch + 1) * steps_per_epoch
 
             train_epoch(
                 model=model,
@@ -717,7 +724,7 @@ def main(args: argparse.Namespace) -> None:
                         data_loader=data_loader_eval,
                         log_writer=log_writer,
                         wandb_run=wandb_run,
-                        wandb_step=(epoch + 1) * steps_per_epoch,
+                        wandb_step=wandb_epoch_end_step,
                     )
                 if device.type == "cuda":
                     torch.cuda.empty_cache()
@@ -729,12 +736,12 @@ def main(args: argparse.Namespace) -> None:
         total_time_str = str(datetime.timedelta(seconds=int(total_time)))
         print("Decoder training time:", total_time_str)
         if wandb_run is not None:
-            wandb_run.log(
-                {
-                    "train/total_time_sec": total_time,
-                    "train/total_time_hms": total_time_str,
-                }
-            )
+            payload = {
+                "train/total_time_sec": total_time,
+                "train/total_time_hms": total_time_str,
+            }
+            misc.add_wandb_global_step(payload, wandb_epoch_end_step)
+            wandb_run.log(payload)
     finally:
         if log_writer is not None:
             log_writer.close()

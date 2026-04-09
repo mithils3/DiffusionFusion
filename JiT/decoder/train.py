@@ -466,7 +466,8 @@ def train_epoch(
                 f"train/{name}": value for name, value in reduced_metrics.items()
             }
             payload["train/epoch_progress"] = epoch_progress
-            wandb_run.log(payload, step=global_step)
+            misc.add_wandb_global_step(payload, global_step)
+            wandb_run.log(payload)
 
     print("Finished")
 
@@ -694,10 +695,8 @@ def evaluate(
             )
 
     if wandb_run is not None:
-        if wandb_step is None:
-            wandb_run.log(log_payload)
-        else:
-            wandb_run.log(log_payload, step=wandb_step)
+        misc.add_wandb_global_step(log_payload, wandb_step)
+        wandb_run.log(log_payload)
 
     _dist_barrier()
     if misc.is_main_process():
