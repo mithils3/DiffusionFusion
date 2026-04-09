@@ -30,6 +30,9 @@ class Denoiser(nn.Module):
         self.P_mean: float = args.P_mean
         self.P_std: float = args.P_std
         self.t_eps: float = args.t_eps
+        self.inference_t_eps: float = getattr(
+            args, "inference_t_eps", min(self.t_eps, 1e-5)
+        )
         self.noise_scale: float = args.noise_scale
 
         # ema
@@ -107,37 +110,47 @@ class Denoiser(nn.Module):
             t = timesteps[i]
             t_next = timesteps[i + 1]
             z_latent, z_dino = stepper(z_latent, z_dino, t, t_next, labels)
-        # last step euler
-        z_latent, z_dino = self._euler_step(
-            z_latent, z_dino, timesteps[-2], timesteps[-1], labels)
+        # Land on the model's guided x-prediction directly so the final step
+        # is not shortened by the training-time velocity clamp near t=1.
+        z_latent, z_dino = self._forward_sample_xpred(
+            z_latent, z_dino, timesteps[-2], labels)
         return z_latent, z_dino
 
     @torch.no_grad()
-    def _forward_sample(self, z_latent: torch.Tensor, z_dino: torch.Tensor, t: torch.Tensor, labels: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def _cfg_scale_interval(self, t: torch.Tensor) -> torch.Tensor:
+        low, high = self.cfg_interval
+        interval_mask = (t < high) & ((low == 0) | (t > low))
+        return torch.where(interval_mask, self.cfg_scale, 1.0)
+
+    @torch.no_grad()
+    def _forward_sample_xpred(
+        self,
+        z_latent: torch.Tensor,
+        z_dino: torch.Tensor,
+        t: torch.Tensor,
+        labels: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         # conditional
         latent_cond, dino_cond = self.net(
             z_latent, z_dino, t.flatten(), labels)
-        v_latent_cond = (latent_cond - z_latent) / \
-            (1.0 - t).clamp_min(self.t_eps)
-        v_dino_cond = (dino_cond - z_dino) / (1.0 - t).clamp_min(self.t_eps)
 
         # unconditional
         latent_uncond, dino_uncond = self.net(
             z_latent, z_dino, t.flatten(), torch.full_like(labels, self.num_classes))
-        v_latent_uncond = (latent_uncond - z_latent) / \
-            (1.0 - t).clamp_min(self.t_eps)
-        v_dino_uncond = (dino_uncond - z_dino) / \
-            (1.0 - t).clamp_min(self.t_eps)
+        cfg_scale_interval = self._cfg_scale_interval(t)
+        latent_pred = latent_uncond + cfg_scale_interval * \
+            (latent_cond - latent_uncond)
+        dino_pred = dino_uncond + cfg_scale_interval * \
+            (dino_cond - dino_uncond)
+        return latent_pred, dino_pred
 
-        # cfg interval
-        low, high = self.cfg_interval
-        interval_mask = (t < high) & ((low == 0) | (t > low))
-        cfg_scale_interval = torch.where(interval_mask, self.cfg_scale, 1.0)
-
-        v_latent = v_latent_uncond + cfg_scale_interval * \
-            (v_latent_cond - v_latent_uncond)
-        v_dino = v_dino_uncond + cfg_scale_interval * \
-            (v_dino_cond - v_dino_uncond)
+    @torch.no_grad()
+    def _forward_sample(self, z_latent: torch.Tensor, z_dino: torch.Tensor, t: torch.Tensor, labels: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        latent_pred, dino_pred = self._forward_sample_xpred(
+            z_latent, z_dino, t, labels)
+        denom = (1.0 - t).clamp_min(self.inference_t_eps)
+        v_latent = (latent_pred - z_latent) / denom
+        v_dino = (dino_pred - z_dino) / denom
         return v_latent, v_dino
 
     @torch.no_grad()
