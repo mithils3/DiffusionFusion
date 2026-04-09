@@ -19,6 +19,35 @@ except ImportError:
     wandb = None
 
 
+class StreamLossBalancer:
+    def __init__(self, ema_decay: float, min_weight: float, max_weight: float):
+        self.ema_decay = float(ema_decay)
+        self.min_weight = float(min_weight)
+        self.max_weight = float(max_weight)
+        self.latent_ema: float | None = None
+        self.dino_ema: float | None = None
+
+    def current_weights(self) -> tuple[float, float]:
+        if self.latent_ema is None or self.dino_ema is None:
+            return 1.0, 1.0
+        total = max(self.latent_ema + self.dino_ema, 1e-8)
+        latent_weight = 2.0 * self.latent_ema / total
+        dino_weight = 2.0 * self.dino_ema / total
+        latent_weight = min(max(latent_weight, self.min_weight), self.max_weight)
+        dino_weight = min(max(dino_weight, self.min_weight), self.max_weight)
+        norm = max(latent_weight + dino_weight, 1e-8)
+        return 2.0 * latent_weight / norm, 2.0 * dino_weight / norm
+
+    def update(self, loss_latent_raw: float, loss_dino_raw: float) -> None:
+        if self.latent_ema is None or self.dino_ema is None:
+            self.latent_ema = float(loss_latent_raw)
+            self.dino_ema = float(loss_dino_raw)
+            return
+        decay = self.ema_decay
+        self.latent_ema = decay * self.latent_ema + (1.0 - decay) * float(loss_latent_raw)
+        self.dino_ema = decay * self.dino_ema + (1.0 - decay) * float(loss_dino_raw)
+
+
 def _iter_accumulation_groups(iterable, accum_iter: int, total_micro_batches: int):
     if accum_iter < 1:
         raise ValueError("accum_iter must be at least 1.")
@@ -100,6 +129,16 @@ def train_one_epoch(
         print('log_dir: {}'.format(log_writer.log_dir))
 
     optimizer_steps_completed = 0
+    supports_loss_components = bool(
+        getattr(model_without_ddp, "supports_loss_components", False)
+    )
+    loss_balancer = None
+    if supports_loss_components:
+        loss_balancer = StreamLossBalancer(
+            ema_decay=getattr(args, "stream_balance_ema", 0.99),
+            min_weight=getattr(args, "stream_balance_min", 0.25),
+            max_weight=getattr(args, "stream_balance_max", 1.75),
+        )
 
     for optimizer_step, (micro_batches, micro_batches_in_update) in enumerate(
         metric_logger.log_every(
@@ -117,6 +156,12 @@ def train_one_epoch(
             args,
         )
         accum_loss = 0.0
+        accum_loss_latent_raw = 0.0
+        accum_loss_dino_raw = 0.0
+        latent_weight, dino_weight = (
+            loss_balancer.current_weights() if loss_balancer is not None else (1.0, 1.0)
+        )
+        saw_loss_components = False
 
         for batch in micro_batches:
             # normalize image to [-1, 1]
@@ -124,7 +169,16 @@ def train_one_epoch(
             dino = batch["dino"].to(device, non_blocking=True)
             labels = batch["y"].to(device, non_blocking=True).view(-1).long()
             with torch.autocast('cuda', dtype=torch.bfloat16):
-                loss = model(latent, dino, labels)
+                if supports_loss_components:
+                    loss_latent_raw, loss_dino_raw = model(
+                        latent,
+                        dino,
+                        labels,
+                        return_loss_components=True,
+                    )
+                    loss = latent_weight * loss_latent_raw + dino_weight * loss_dino_raw
+                else:
+                    loss = model(latent, dino, labels)
 
             loss_value = loss.item()
             if not math.isfinite(loss_value):
@@ -132,6 +186,10 @@ def train_one_epoch(
                 sys.exit(1)
 
             accum_loss += loss_value
+            if supports_loss_components:
+                saw_loss_components = True
+                accum_loss_latent_raw += loss_latent_raw.item()
+                accum_loss_dino_raw += loss_dino_raw.item()
             (loss / micro_batches_in_update).backward()
 
         optimizer.step()
@@ -141,10 +199,47 @@ def train_one_epoch(
         step_loss = accum_loss / micro_batches_in_update
         metric_logger.update(loss=step_loss)
         metric_logger.update(lr=lr)
+        step_loss_latent_raw = None
+        step_loss_dino_raw = None
+        step_loss_latent_weighted = None
+        step_loss_dino_weighted = None
+        if saw_loss_components:
+            step_loss_latent_raw = accum_loss_latent_raw / micro_batches_in_update
+            step_loss_dino_raw = accum_loss_dino_raw / micro_batches_in_update
+            step_loss_latent_weighted = latent_weight * step_loss_latent_raw
+            step_loss_dino_weighted = dino_weight * step_loss_dino_raw
+            metric_logger.update(
+                loss_latent_raw=step_loss_latent_raw,
+                loss_dino_raw=step_loss_dino_raw,
+                latent_weight=latent_weight,
+                dino_weight=dino_weight,
+            )
 
         loss_value_reduce = misc.all_reduce_mean(step_loss)
+        loss_latent_raw_reduce = (
+            misc.all_reduce_mean(step_loss_latent_raw)
+            if step_loss_latent_raw is not None
+            else None
+        )
+        loss_dino_raw_reduce = (
+            misc.all_reduce_mean(step_loss_dino_raw)
+            if step_loss_dino_raw is not None
+            else None
+        )
+        loss_latent_weighted_reduce = (
+            misc.all_reduce_mean(step_loss_latent_weighted)
+            if step_loss_latent_weighted is not None
+            else None
+        )
+        loss_dino_weighted_reduce = (
+            misc.all_reduce_mean(step_loss_dino_weighted)
+            if step_loss_dino_weighted is not None
+            else None
+        )
         completed_optimizer_steps = optimizer_step + 1
         optimizer_steps_completed = completed_optimizer_steps
+        if loss_balancer is not None and loss_latent_raw_reduce is not None:
+            loss_balancer.update(loss_latent_raw_reduce, loss_dino_raw_reduce)
 
         if log_writer is not None:
             # Use epoch_1000x as the x-axis in TensorBoard to calibrate curves.
@@ -155,6 +250,37 @@ def train_one_epoch(
                 log_writer.add_scalar(
                     'train_loss', loss_value_reduce, epoch_1000x)
                 log_writer.add_scalar('lr', lr, epoch_1000x)
+                if loss_latent_raw_reduce is not None:
+                    log_writer.add_scalar(
+                        'train_loss_latent_raw',
+                        loss_latent_raw_reduce,
+                        epoch_1000x,
+                    )
+                    log_writer.add_scalar(
+                        'train_loss_dino_raw',
+                        loss_dino_raw_reduce,
+                        epoch_1000x,
+                    )
+                    log_writer.add_scalar(
+                        'train_loss_latent_weighted',
+                        loss_latent_weighted_reduce,
+                        epoch_1000x,
+                    )
+                    log_writer.add_scalar(
+                        'train_loss_dino_weighted',
+                        loss_dino_weighted_reduce,
+                        epoch_1000x,
+                    )
+                    log_writer.add_scalar(
+                        'train_latent_weight',
+                        latent_weight,
+                        epoch_1000x,
+                    )
+                    log_writer.add_scalar(
+                        'train_dino_weight',
+                        dino_weight,
+                        epoch_1000x,
+                    )
         if wandb_run is not None and optimizer_step % args.log_freq == 0:
             global_step = epoch * optimizer_steps_per_epoch + optimizer_step
             payload = {
@@ -162,6 +288,15 @@ def train_one_epoch(
                 "train/lr": lr,
                 "train/epoch_progress": epoch + completed_optimizer_steps / optimizer_steps_per_epoch,
             }
+            if loss_latent_raw_reduce is not None:
+                payload.update({
+                    "train/loss_latent_raw": loss_latent_raw_reduce,
+                    "train/loss_dino_raw": loss_dino_raw_reduce,
+                    "train/loss_latent_weighted": loss_latent_weighted_reduce,
+                    "train/loss_dino_weighted": loss_dino_weighted_reduce,
+                    "train/latent_weight": latent_weight,
+                    "train/dino_weight": dino_weight,
+                })
             misc.add_wandb_global_step(payload, global_step)
             wandb_run.log(payload)
     if optimizer_steps_completed != optimizer_steps_per_epoch:

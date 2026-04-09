@@ -17,7 +17,7 @@ from JiT.util.dataset import (
 )
 import copy
 from JiT.engine_jit import train_one_epoch, evaluate
-from JiT.denoiser import Denoiser
+from JiT.auto_balanced_denoiser import AutoBalancedDenoiser
 from JiT.eval.diffusion_decoder import load_decoder_for_eval
 
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -70,9 +70,9 @@ def get_args_parser():
                         help='Learning rate (absolute)')
     parser.add_argument('--blr', type=float, default=5e-5, metavar='LR',
                         help='Base learning rate: absolute_lr = base_lr * effective_batch_size / 256')
-    parser.add_argument('--min_lr', type=float, default=0., metavar='LR',
+    parser.add_argument('--min_lr', type=float, default=1e-5, metavar='LR',
                         help='Minimum LR for cyclic schedulers that hit 0')
-    parser.add_argument('--lr_schedule', type=str, default='constant',
+    parser.add_argument('--lr_schedule', type=str, default='cosine',
                         help='Learning rate schedule')
     parser.add_argument('--weight_decay', type=float, default=0.0,
                         help='Weight decay (default: 0.0)')
@@ -84,8 +84,12 @@ def get_args_parser():
     parser.add_argument('--P_std', default=0.8, type=float)
     parser.add_argument('--noise_scale', default=1.0, type=float)
     parser.add_argument('--t_eps', default=5e-2, type=float)
-    parser.add_argument('--inference_t_eps', default=1e-5, type=float,
-                        help='Clamp floor used only during inference velocity conversion')
+    parser.add_argument('--stream_balance_ema', default=0.99, type=float,
+                        help='EMA decay for automatic latent/DINO loss balancing')
+    parser.add_argument('--stream_balance_min', default=0.25, type=float,
+                        help='Minimum per-stream balancing weight')
+    parser.add_argument('--stream_balance_max', default=1.75, type=float,
+                        help='Maximum per-stream balancing weight')
     parser.add_argument('--label_drop_prob', default=0.1, type=float)
 
     parser.add_argument('--seed', default=0, type=int)
@@ -298,7 +302,7 @@ def main(args):
     torch._dynamo.config.optimize_ddp = False
 
     # Create denoiser
-    model = Denoiser(args)
+    model = AutoBalancedDenoiser(args)
 
     print("Model =", model)
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
