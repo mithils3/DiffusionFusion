@@ -23,20 +23,6 @@ class _ToyJitModel(torch.nn.Module):
         self.ema_updates += 1
 
 
-class _ToyJitModelWithLossComponents(_ToyJitModel):
-    def __init__(self):
-        super().__init__()
-        self.supports_loss_components = True
-
-    def forward(self, latent, dino, labels, return_loss_components=False):
-        del labels
-        loss_latent_raw = self.weight * latent.float().mean()
-        loss_dino_raw = 0.5 * self.weight * dino.float().mean()
-        if return_loss_components:
-            return loss_latent_raw, loss_dino_raw
-        return loss_latent_raw + loss_dino_raw
-
-
 class _FakeWandbRun:
     def __init__(self):
         self.logged = []
@@ -168,54 +154,6 @@ class EngineJitAccumulationTests(unittest.TestCase):
         self.assertEqual(second_payload["trainer/global_step"], 1)
         self.assertIn("train/loss", first_payload)
         self.assertIn("train/epoch_progress", second_payload)
-
-    def test_train_one_epoch_logs_loss_components_when_available(self):
-        model = _ToyJitModelWithLossComponents()
-        optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
-        data_loader = [
-            {
-                "latent": torch.full((2, 2), 2.0),
-                "dino": torch.full((2, 2), 4.0),
-                "y": torch.zeros(2, dtype=torch.long),
-            },
-        ]
-        args = SimpleNamespace(
-            accum_iter=1,
-            epochs=1,
-            log_freq=1,
-            lr=0.1,
-            lr_schedule="constant",
-            min_lr=0.0,
-            warmup_epochs=0,
-        )
-        wandb_run = _FakeWandbRun()
-
-        def fake_autocast(*_args, **_kwargs):
-            return nullcontext()
-
-        with patch("JiT.engine_jit.torch.autocast", fake_autocast):
-            train_one_epoch(
-                model=model,
-                model_without_ddp=model,
-                data_loader=data_loader,
-                optimizer=optimizer,
-                device=torch.device("cpu"),
-                epoch=0,
-                log_writer=None,
-                args=args,
-                steps_per_epoch=1,
-                optimizer_steps_per_epoch=1,
-                wandb_run=wandb_run,
-            )
-
-        payload, _kwargs = wandb_run.logged[0]
-        self.assertAlmostEqual(payload["train/loss"], 4.0, places=5)
-        self.assertAlmostEqual(payload["train/loss_latent_raw"], 2.0, places=5)
-        self.assertAlmostEqual(payload["train/loss_dino_raw"], 2.0, places=5)
-        self.assertAlmostEqual(payload["train/loss_latent_weighted"], 2.0, places=5)
-        self.assertAlmostEqual(payload["train/loss_dino_weighted"], 2.0, places=5)
-        self.assertAlmostEqual(payload["train/latent_weight"], 1.0, places=5)
-        self.assertAlmostEqual(payload["train/dino_weight"], 1.0, places=5)
 
 
 if __name__ == "__main__":

@@ -17,7 +17,7 @@ from JiT.util.dataset import (
 )
 import copy
 from JiT.engine_jit import train_one_epoch, evaluate
-from JiT.auto_balanced_denoiser import AutoBalancedDenoiser
+from JiT.denoiser import Denoiser
 from JiT.eval.diffusion_decoder import load_decoder_for_eval
 
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -84,12 +84,8 @@ def get_args_parser():
     parser.add_argument('--P_std', default=0.8, type=float)
     parser.add_argument('--noise_scale', default=1.0, type=float)
     parser.add_argument('--t_eps', default=5e-2, type=float)
-    parser.add_argument('--stream_balance_ema', default=0.99, type=float,
-                        help='EMA decay for automatic latent/DINO loss balancing')
-    parser.add_argument('--stream_balance_min', default=0.25, type=float,
-                        help='Minimum per-stream balancing weight')
-    parser.add_argument('--stream_balance_max', default=1.75, type=float,
-                        help='Maximum per-stream balancing weight')
+    parser.add_argument('--inference_t_eps', default=1e-5, type=float,
+                        help='Clamp floor used only during inference velocity conversion')
     parser.add_argument('--label_drop_prob', default=0.1, type=float)
 
     parser.add_argument('--seed', default=0, type=int)
@@ -302,7 +298,7 @@ def main(args):
     torch._dynamo.config.optimize_ddp = False
 
     # Create denoiser
-    model = AutoBalancedDenoiser(args)
+    model = Denoiser(args)
 
     print("Model =", model)
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)

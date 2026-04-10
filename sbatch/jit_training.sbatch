@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -J JiT_auto_balance
+#SBATCH -J JiT_cosine
 #SBATCH -A betw-dtai-gh
 #SBATCH -p ghx4
 #SBATCH --nodes=1
@@ -22,17 +22,14 @@ module load cuda/12.9.0
 source /u/msalunkhe/.venv/bin/activate
 cd /u/msalunkhe/DiffusionFusion/JiT
 IMAGENET_PATH="/work/hdd/bgnp/msalunkhe/data/imagenet/"
-OUTPUT_DIR="/work/nvme/bgnp/msalunkhe/outputs/jit_base_patch_size_2_cosine_auto_balance_80ep"
-WANDB_RUN_NAME="${WANDB_RUN_NAME:-jit_base_patch_size_2_cosine_auto_balance_80ep}"
+OUTPUT_DIR="/work/nvme/bgnp/msalunkhe/outputs/jit_base_patch_size_2_cosine_80ep"
+WANDB_RUN_NAME="${WANDB_RUN_NAME:-jit_base_patch_size_2_cosine_80ep}"
 FID_STATS_PATH="${FID_STATS_PATH:-/u/msalunkhe/DiffusionFusion/JiT/fid_stats/jit_in256_stats.npz}"
 NUM_IMAGES="${NUM_IMAGES:-5000}"
 EVAL_FREQ="${EVAL_FREQ:-20}"
 EPOCHS="${EPOCHS:-80}"
 LR_SCHEDULE="${LR_SCHEDULE:-cosine}"
 MIN_LR="${MIN_LR:-1e-5}"
-STREAM_BALANCE_EMA="${STREAM_BALANCE_EMA:-0.99}"
-STREAM_BALANCE_MIN="${STREAM_BALANCE_MIN:-0.25}"
-STREAM_BALANCE_MAX="${STREAM_BALANCE_MAX:-1.75}"
 mkdir -p "${OUTPUT_DIR}"
 OMP_NUM_THREADS=16 torchrun \
 --nproc_per_node=auto \
@@ -51,10 +48,7 @@ main_jit.py \
 --warmup_epochs 5 \
 --lr_schedule "${LR_SCHEDULE}" \
 --min_lr "${MIN_LR}" \
---stream_balance_ema "${STREAM_BALANCE_EMA}" \
---stream_balance_min "${STREAM_BALANCE_MIN}" \
---stream_balance_max "${STREAM_BALANCE_MAX}" \
---gen_bsz 64 \
+    --gen_bsz 64 \
 --num_images "${NUM_IMAGES}" \
 --cfg 2.9 \
 --interval_min 0.1 \
