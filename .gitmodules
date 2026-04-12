@@ -7,3 +7,6 @@
 [submodule "guided-diffusion"]
 	path = guided-diffusion
 	url = https://github.com/openai/guided-diffusion/
+[submodule "LightningDiT"]
+	path = LightningDiT
+	url = https://github.com/hustvl/LightningDiT.git
