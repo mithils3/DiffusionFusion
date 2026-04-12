@@ -64,7 +64,7 @@ OMP_NUM_THREADS=16 torchrun \
 --data_path ${IMAGENET_PATH} \
 --online_eval \
 --fid_stats_path "${FID_STATS_PATH}" \
---decoder_checkpoint /work/nvme/bgnp/msalunkhe/outputs/custom_decoder_small_gan_lower_noise/checkpoint-last.pth \
+--decoder_checkpoint /work/nvme/bgnp/msalunkhe/outputs/jit_decoder_small_gan_lower_noise/checkpoint-last.pth \
 --decoder_checkpoint_key model_ema \
 --class_num 1000 \
 --eval_freq "${EVAL_FREQ}"
