@@ -23,7 +23,7 @@ from PIL import Image
 
 
 def sample_noise_sigmas(batch_size: int, noise_tau: float) -> torch.Tensor:
-    """Same sampling as JiT/decoder/gan.py apply_noise_augmentation."""
+    """Same sampling as custom/decoder/gan.py apply_noise_augmentation."""
     return torch.empty(batch_size).normal_(mean=0.0, std=noise_tau).abs_()
 
 

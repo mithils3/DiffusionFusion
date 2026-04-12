@@ -28,7 +28,7 @@ OMP_NUM_THREADS=16 torchrun \
   --nproc_per_node=auto \
   --nnodes=1 \
   --node_rank=0 \
-  JiT/eval/eval_sdxl_vae.py \
+  -m custom.eval.eval_sdxl_vae \
   --data-path "${IMAGE_DATA_PATH}" \
   --output-dir "${OUTPUT_DIR}" \
   --split validation \
