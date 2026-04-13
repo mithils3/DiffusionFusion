@@ -15,13 +15,13 @@ from JiT.eval.vae_eval import (
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_VAE_EVAL_SCRIPT = _REPO_ROOT / "JiT" / "eval" / "vae_eval.py"
+_GENERATION_EVAL_SCRIPT = _REPO_ROOT / "JiT" / "eval" / "vae_eval.py"
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Run a staged JiT CFG sweep with VAE decoding, select the best 5k-image "
+            "Run a staged JiT CFG sweep with image decoding, select the best 5k-image "
             "FID, then rerun that CFG at 50k images."
         )
     )
@@ -36,11 +36,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=str, required=True)
     parser.add_argument("--fid-stats-path", type=str, default=None)
     parser.add_argument(
+        "--decode-backend",
+        type=str,
+        default="vae",
+        choices=["vae", "decoder"],
+    )
+    parser.add_argument(
         "--vae-pretrained-path",
         type=str,
         default="stabilityai/sdxl-vae",
     )
     parser.add_argument("--local-files-only", action="store_true")
+    parser.add_argument("--decoder-checkpoint", type=str, default=None)
+    parser.add_argument(
+        "--decoder-checkpoint-key",
+        type=str,
+        default="auto",
+        choices=["auto", "model", "model_ema"],
+    )
     parser.add_argument("--keep-images", action="store_true")
     parser.add_argument("--gen-bsz", type=int, default=128)
     parser.add_argument("--sweep-num-images", type=int, default=5000)
@@ -198,6 +211,7 @@ def discover_metrics_path(run_dir: Path) -> Path | None:
 
 
 def load_metrics_if_compatible(
+    cli_args: argparse.Namespace,
     run_dir: Path,
     cfg: float,
     num_images: int,
@@ -210,6 +224,21 @@ def load_metrics_if_compatible(
     if normalize_cfg(float(metrics["cfg"])) != normalize_cfg(cfg):
         return None
     if int(metrics["num_images"]) != int(num_images):
+        return None
+    metrics_backend = str(metrics.get("decode_backend", "vae"))
+    if metrics_backend != cli_args.decode_backend:
+        return None
+    if cli_args.decode_backend == "decoder":
+        if cli_args.decoder_checkpoint is None:
+            return None
+        expected_decoder_checkpoint = str(
+            Path(cli_args.decoder_checkpoint).expanduser().resolve()
+        )
+        if metrics.get("decoder_checkpoint") != expected_decoder_checkpoint:
+            return None
+        if metrics.get("decoder_checkpoint_key") != cli_args.decoder_checkpoint_key:
+            return None
+    elif metrics.get("vae_pretrained_path", cli_args.vae_pretrained_path) != cli_args.vae_pretrained_path:
         return None
 
     metrics["metrics_path"] = str(metrics_path)
@@ -231,11 +260,13 @@ def build_eval_command(
         str(cli_args.nnodes),
         "--node_rank",
         str(cli_args.node_rank),
-        str(_VAE_EVAL_SCRIPT),
+        str(_GENERATION_EVAL_SCRIPT),
         "--output-dir",
         str(run_dir),
         "--checkpoint-key",
         cli_args.checkpoint_key,
+        "--decode-backend",
+        cli_args.decode_backend,
         "--vae-pretrained-path",
         cli_args.vae_pretrained_path,
         "--gen-bsz",
@@ -255,6 +286,8 @@ def build_eval_command(
 
     optional_pairs = [
         ("--fid-stats-path", cli_args.fid_stats_path),
+        ("--decoder-checkpoint", cli_args.decoder_checkpoint),
+        ("--decoder-checkpoint-key", cli_args.decoder_checkpoint_key),
         ("--interval-min", cli_args.interval_min),
         ("--interval-max", cli_args.interval_max),
         ("--num-sampling-steps", cli_args.num_sampling_steps),
@@ -293,6 +326,7 @@ def write_summary(
         "checkpoint": str(checkpoint_path),
         "resume_dir": cli_args.resume_dir,
         "output_dir": cli_args.output_dir,
+        "decode_backend": cli_args.decode_backend,
         "base_cfg": normalize_cfg(base_cfg),
         "sweep_num_images": cli_args.sweep_num_images,
         "final_num_images": cli_args.final_num_images,
@@ -315,7 +349,7 @@ def run_eval(
     run_dir.mkdir(parents=True, exist_ok=True)
 
     if not cli_args.force:
-        existing_metrics = load_metrics_if_compatible(run_dir, cfg, num_images)
+        existing_metrics = load_metrics_if_compatible(cli_args, run_dir, cfg, num_images)
         if existing_metrics is not None:
             log(
                 f"Reusing existing metrics for cfg={normalize_cfg(cfg)} "
@@ -330,7 +364,7 @@ def run_eval(
     )
     subprocess.run(command, cwd=_REPO_ROOT, check=True)
 
-    metrics = load_metrics_if_compatible(run_dir, cfg, num_images)
+    metrics = load_metrics_if_compatible(cli_args, run_dir, cfg, num_images)
     if metrics is None:
         raise FileNotFoundError(
             f"Expected metrics JSON was not produced for cfg={cfg} in {run_dir}"
@@ -340,6 +374,10 @@ def run_eval(
 
 def main() -> None:
     args = parse_args()
+    if args.decode_backend == "decoder" and args.decoder_checkpoint is None:
+        raise ValueError(
+            "Decoder-backed CFG sweeps require --decoder-checkpoint."
+        )
     checkpoint_path, checkpoint_args = load_checkpoint_defaults(args)
 
     base_cfg = (

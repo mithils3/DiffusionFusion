@@ -87,6 +87,18 @@ class VaeEvalHelperTests(unittest.TestCase):
         self.assertEqual(eval_args.class_num, 1000)
         self.assertEqual(eval_args.seed, 123)
 
+    def test_load_generation_decoder_requires_checkpoint_for_decoder_backend(self):
+        args = SimpleNamespace(
+            decode_backend="decoder",
+            decoder_checkpoint=None,
+            decoder_checkpoint_key="auto",
+            vae_pretrained_path="stabilityai/sdxl-vae",
+            local_files_only=False,
+        )
+
+        with self.assertRaisesRegex(ValueError, "requires --decoder-checkpoint"):
+            vae_eval_module.load_generation_decoder(args, device="cpu")
+
 
 if __name__ == "__main__":
     unittest.main()

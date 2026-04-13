@@ -22,8 +22,11 @@ git pull
 
 TRAIN_OUTPUT_DIR="${TRAIN_OUTPUT_DIR:-/work/nvme/bgnp/msalunkhe/outputs/jit_base_patch_size_2_higher_lr}"
 RESUME_DIR="${RESUME_DIR:-${TRAIN_OUTPUT_DIR}}"
-OUTPUT_DIR="${OUTPUT_DIR:-${TRAIN_OUTPUT_DIR}/cfg_sweep_vae_eval}"
+OUTPUT_DIR="${OUTPUT_DIR:-${TRAIN_OUTPUT_DIR}/cfg_sweep_eval}"
 FID_STATS_PATH="${FID_STATS_PATH:-/u/msalunkhe/DiffusionFusion/JiT/fid_stats/jit_in256_stats.npz}"
+DECODE_BACKEND="${DECODE_BACKEND:-decoder}"
+DECODER_CHECKPOINT="${DECODER_CHECKPOINT:-/work/nvme/bgnp/msalunkhe/outputs/jit_decoder_small_gan_lower_noise/checkpoint-last.pth}"
+DECODER_CHECKPOINT_KEY="${DECODER_CHECKPOINT_KEY:-model_ema}"
 VAE_PRETRAINED_PATH="${VAE_PRETRAINED_PATH:-stabilityai/sdxl-vae}"
 
 GEN_BSZ="${GEN_BSZ:-128}"
@@ -65,6 +68,9 @@ python JiT/eval/cfg_sweep.py \
   --output-dir "${OUTPUT_DIR}" \
   --checkpoint-key "${CHECKPOINT_KEY}" \
   --fid-stats-path "${FID_STATS_PATH}" \
+  --decode-backend "${DECODE_BACKEND}" \
+  --decoder-checkpoint "${DECODER_CHECKPOINT}" \
+  --decoder-checkpoint-key "${DECODER_CHECKPOINT_KEY}" \
   --vae-pretrained-path "${VAE_PRETRAINED_PATH}" \
   --gen-bsz "${GEN_BSZ}" \
   --sweep-num-images "${SWEEP_NUM_IMAGES}" \

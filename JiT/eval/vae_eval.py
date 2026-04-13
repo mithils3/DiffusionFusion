@@ -17,6 +17,7 @@ import torch.distributed as dist
 from PIL import Image
 
 from JiT.denoiser import Denoiser
+from JiT.eval.diffusion_decoder import decode_with_decoder, load_decoder_for_eval
 
 
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -29,8 +30,8 @@ _FID_STATS_DIR = Path(__file__).resolve().parents[1] / "fid_stats"
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Evaluate a trained JiT checkpoint by decoding only the generated latent stream "
-            "with an SDXL VAE and computing FID/IS."
+            "Evaluate a trained JiT checkpoint by decoding generated samples with either "
+            "an SDXL VAE or the trained JiT decoder and computing FID/IS."
         )
     )
     parser.add_argument(
@@ -60,6 +61,13 @@ def parse_args() -> argparse.Namespace:
         help="Path to torch-fidelity FID stats. Defaults to JiT/fid_stats/jit_in{image_size}_stats.npz.",
     )
     parser.add_argument(
+        "--decode-backend",
+        type=str,
+        default="vae",
+        choices=["vae", "decoder"],
+        help="Image decoder used for generation evaluation.",
+    )
+    parser.add_argument(
         "--vae-pretrained-path",
         type=str,
         default="stabilityai/sdxl-vae",
@@ -69,6 +77,19 @@ def parse_args() -> argparse.Namespace:
         "--local-files-only",
         action="store_true",
         help="Only load the SDXL VAE from the local Hugging Face cache.",
+    )
+    parser.add_argument(
+        "--decoder-checkpoint",
+        type=str,
+        default=None,
+        help="Path to a trained JiT decoder checkpoint used when --decode-backend=decoder.",
+    )
+    parser.add_argument(
+        "--decoder-checkpoint-key",
+        type=str,
+        default="auto",
+        choices=["auto", "model", "model_ema"],
+        help="Decoder checkpoint state dict key to load when --decode-backend=decoder.",
     )
     parser.add_argument("--num-images", type=int, default=50000)
     parser.add_argument(
@@ -304,6 +325,41 @@ def decode_latents_with_vae(vae, latents: torch.Tensor) -> np.ndarray:
     return images.permute(0, 2, 3, 1).to("cpu", dtype=torch.uint8).numpy()
 
 
+def load_generation_decoder(
+    args: argparse.Namespace,
+    device: torch.device,
+):
+    if args.decode_backend == "vae":
+        return load_vae_decoder(
+            args.vae_pretrained_path,
+            device,
+            args.local_files_only,
+        )
+
+    if args.decoder_checkpoint is None:
+        raise ValueError(
+            "Decoder-backed generation evaluation requires --decoder-checkpoint."
+        )
+    decoder_checkpoint_path = str(Path(args.decoder_checkpoint).expanduser().resolve())
+    args.decoder_checkpoint = decoder_checkpoint_path
+    return load_decoder_for_eval(
+        decoder_checkpoint_path,
+        device,
+        args.decoder_checkpoint_key,
+    )
+
+
+def decode_generated_images(
+    args: argparse.Namespace,
+    image_decoder,
+    sampled_latents: torch.Tensor,
+    sampled_dino: torch.Tensor,
+) -> np.ndarray:
+    if args.decode_backend == "vae":
+        return decode_latents_with_vae(image_decoder, sampled_latents)
+    return decode_with_decoder(image_decoder, sampled_latents, sampled_dino)
+
+
 def save_uint8_pngs(
     images: np.ndarray,
     indices: np.ndarray,
@@ -326,7 +382,7 @@ def run_torch_fidelity_metrics(
         import torch_fidelity
     except ImportError as exc:
         raise ImportError(
-            "torch-fidelity is required for latent-only VAE evaluation. "
+            "torch-fidelity is required for generation evaluation. "
             "Install it from requirements.txt."
         ) from exc
 
@@ -400,16 +456,12 @@ def main() -> None:
         model.load_state_dict(checkpoint_state, strict=True)
         model.eval()
 
-        vae = load_vae_decoder(
-            args.vae_pretrained_path,
-            device,
-            args.local_files_only,
-        )
+        image_decoder = load_generation_decoder(args, device)
 
         run_tag = (
             f"{model.method}-steps{model.steps}-cfg{model.cfg_scale}"
             f"-interval{model.cfg_interval[0]}-{model.cfg_interval[1]}"
-            f"-image{args.num_images}-res{eval_args.latent_size}-vae"
+            f"-image{args.num_images}-res{eval_args.latent_size}-{args.decode_backend}"
         )
         save_folder = output_dir / run_tag
         if rank == 0:
@@ -423,7 +475,14 @@ def main() -> None:
             rank,
             f"Evaluating checkpoint key `{checkpoint_key}` from epoch {checkpoint_epoch}{prefix_message}.",
         )
-        log_rank0(rank, f"Decoding JiT latents with VAE `{args.vae_pretrained_path}`")
+        if args.decode_backend == "vae":
+            log_rank0(rank, f"Decoding JiT latents with VAE `{args.vae_pretrained_path}`")
+        else:
+            log_rank0(
+                rank,
+                f"Decoding JiT latents + DINO with decoder `{args.decoder_checkpoint}` "
+                f"(key `{args.decoder_checkpoint_key}`)",
+            )
         log_rank0(rank, f"Writing temporary samples to {save_folder}")
 
         global_batch_size = args.gen_bsz * world_size
@@ -449,9 +508,14 @@ def main() -> None:
             labels_gen_tensor = torch.from_numpy(labels_gen).to(device=device, dtype=torch.long)
 
             with autocast_context(device):
-                sampled_latents, _sampled_dino = model.generate(labels_gen_tensor)
+                sampled_latents, sampled_dino = model.generate(labels_gen_tensor)
 
-            sampled_images = decode_latents_with_vae(vae, sampled_latents)
+            sampled_images = decode_generated_images(
+                args,
+                image_decoder,
+                sampled_latents,
+                sampled_dino,
+            )
             batch_indices = np.arange(
                 start_idx,
                 start_idx + sampled_images.shape[0],
@@ -483,7 +547,16 @@ def main() -> None:
                 "checkpoint_key": checkpoint_key,
                 "checkpoint_epoch": checkpoint_epoch,
                 "fid_stats_path": str(fid_stats_path),
-                "vae_pretrained_path": args.vae_pretrained_path,
+                "decode_backend": args.decode_backend,
+                "vae_pretrained_path": (
+                    args.vae_pretrained_path if args.decode_backend == "vae" else None
+                ),
+                "decoder_checkpoint": (
+                    args.decoder_checkpoint if args.decode_backend == "decoder" else None
+                ),
+                "decoder_checkpoint_key": (
+                    args.decoder_checkpoint_key if args.decode_backend == "decoder" else None
+                ),
                 "sampling_method": model.method,
                 "num_sampling_steps": model.steps,
                 "cfg": float(model.cfg_scale),
