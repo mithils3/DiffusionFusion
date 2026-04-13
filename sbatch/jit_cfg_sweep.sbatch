@@ -69,7 +69,7 @@ python JiT/eval/cfg_sweep.py \
   --gen-bsz "${GEN_BSZ}" \
   --sweep-num-images "${SWEEP_NUM_IMAGES}" \
   --final-num-images "${FINAL_NUM_IMAGES}" \
-  --coarse-offsets "${COARSE_OFFSETS}" \
+  --coarse-offsets="${COARSE_OFFSETS}" \
   --refine-step "${REFINE_STEP}" \
   --refine-count "${REFINE_COUNT}" \
   --cfg-min "${CFG_MIN}" \
