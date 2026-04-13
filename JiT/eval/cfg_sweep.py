@@ -60,13 +60,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--coarse-offsets",
         type=str,
-        default="-0.5,-0.25,0.0,0.25,0.5",
+        default="-0.8,-0.4,0.0,0.4,0.8",
         help="Comma/space-separated offsets added to --base-cfg for the coarse sweep.",
     )
     parser.add_argument("--refine-step", type=float, default=0.1)
     parser.add_argument("--refine-count", type=int, default=2)
-    parser.add_argument("--cfg-min", type=float, default=1.5)
-    parser.add_argument("--cfg-max", type=float, default=4.0)
+    parser.add_argument("--cfg-min", type=float, default=1.0)
+    parser.add_argument("--cfg-max", type=float, default=4.5)
     parser.add_argument("--interval-min", type=float, default=None)
     parser.add_argument("--interval-max", type=float, default=None)
     parser.add_argument("--num-sampling-steps", type=int, default=None)
