@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -J custom_vae_eval
+#SBATCH -J JiT_vae_eval
 #SBATCH -A betw-dtai-gh
 #SBATCH -p ghx4
 #SBATCH --nodes=1
@@ -20,10 +20,10 @@ source /u/msalunkhe/.venv/bin/activate
 cd /u/msalunkhe/DiffusionFusion
 git pull
 
-TRAIN_OUTPUT_DIR="${TRAIN_OUTPUT_DIR:-/work/nvme/bgnp/msalunkhe/outputs/custom_base_patch_size_2_higher_lr}"
+TRAIN_OUTPUT_DIR="${TRAIN_OUTPUT_DIR:-/work/nvme/bgnp/msalunkhe/outputs/jit_base_patch_size_2_higher_lr}"
 RESUME_DIR="${RESUME_DIR:-${TRAIN_OUTPUT_DIR}}"
 OUTPUT_DIR="${OUTPUT_DIR:-${TRAIN_OUTPUT_DIR}/vae_eval}"
-FID_STATS_PATH="${FID_STATS_PATH:-/u/msalunkhe/DiffusionFusion/custom/fid_stats/custom_in256_stats.npz}"
+FID_STATS_PATH="${FID_STATS_PATH:-/u/msalunkhe/DiffusionFusion/JiT/fid_stats/jit_in256_stats.npz}"
 VAE_PRETRAINED_PATH="${VAE_PRETRAINED_PATH:-stabilityai/sdxl-vae}"
 
 GEN_BSZ="${GEN_BSZ:-128}"
@@ -47,7 +47,7 @@ OMP_NUM_THREADS=16 torchrun \
   --nproc_per_node=auto \
   --nnodes=1 \
   --node_rank=0 \
-  -m custom.eval.vae_eval \
+  JiT/eval/vae_eval.py \
   --resume-dir "${RESUME_DIR}" \
   --output-dir "${OUTPUT_DIR}" \
   --fid-stats-path "${FID_STATS_PATH}" \

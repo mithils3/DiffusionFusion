@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -J custom_decoder_eval
+#SBATCH -J JiT_decoder_eval
 #SBATCH -A bgnp-dtai-gh
 #SBATCH -p ghx4
 #SBATCH --nodes=1
@@ -20,7 +20,7 @@ source /u/msalunkhe/.venv/bin/activate
 cd /u/msalunkhe/DiffusionFusion
 git pull
 
-CHECKPOINT="${CHECKPOINT:-/work/nvme/bgnp/msalunkhe/outputs/custom_decoder_small_gan_lower_noise/checkpoint-last.pth}"
+CHECKPOINT="${CHECKPOINT:-/work/nvme/bgnp/msalunkhe/outputs/jit_decoder_small_gan_lower_noise/checkpoint-last.pth}"
 FEATURE_ROOT="${FEATURE_ROOT:-/work/hdd/bgnp/msalunkhe/data/imagenet}"
 IMAGE_DATA_PATH="${IMAGE_DATA_PATH:-ILSVRC/imagenet-1k}"
 SPLIT="${SPLIT:-validation}"
@@ -44,7 +44,7 @@ OMP_NUM_THREADS=16 torchrun \
   --nproc_per_node=1 \
   --nnodes=1 \
   --node_rank=0 \
-  -m custom.eval.eval_decoder \
+  JiT/eval/eval_decoder.py \
   --checkpoint "${CHECKPOINT}" \
   --feature-root "${FEATURE_ROOT}" \
   --image-data-path "${IMAGE_DATA_PATH}" \

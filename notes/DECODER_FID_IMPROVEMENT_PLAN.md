@@ -2,7 +2,7 @@
 
 ## Current Gap
 
-| Metric | custom decoder | SDXL-VAE | Gap |
+| Metric | JiT Decoder | SDXL-VAE | Gap |
 |---|---|---|---|
 | FID (50k ImageNet val) | 1.218 | 0.690 | 0.528 |
 | Recon MSE | 0.0673 | — | — |
@@ -10,7 +10,7 @@
 
 ## Important Framing
 
-- `custom/eval/eval_decoder.py` measures decoder-only autoencoding from clean saved latents + clean DINO features. This is NOT end-to-end custom generation quality.
+- `JiT/eval/eval_decoder.py` measures decoder-only autoencoding from clean saved latents + clean DINO features. This is NOT end-to-end JiT generation quality.
 - Noise augmentation (`noise_tau = 0.2`) is kept during training to preserve downstream robustness. Evaluation feeds clean features, so the noise penalty is real but accepted.
 - The decoder receives 49x more input information than SDXL-VAE (200k values vs 4k). The FID gap is not a capacity problem — it is architecture, training length, and loss alignment.
 - Goal: get close to SDXL-VAE FID (~0.70-0.80) while preserving noise robustness. NOT optimizing the clean-decoder benchmark at all costs.
@@ -188,7 +188,7 @@ Expected: FID 0.85-1.05. Gap between this and tau=0.2 run = noise penalty.
 ## Exact Code Changes for Architecture Fixes (Run B)
 
 ### Fix 1: Remove double DINO normalization
-File: `custom/decoder/dataset.py`, line 513
+File: `JiT/decoder/dataset.py`, line 513
 
 ```python
 # Before:
@@ -201,7 +201,7 @@ dino = torch.from_numpy(rows["dino"])
 Verify: log DINO feature mean/std before and after to confirm features are already normalized.
 
 ### Fix 2: Add modality type embeddings
-File: `custom/decoder/model.py`
+File: `JiT/decoder/model.py`
 
 In `__init__`, after `self.query_pos_embed` (line 40):
 ```python
@@ -226,7 +226,7 @@ latent_tokens = latent_tokens + self.pos_embed + self.latent_type_embed
 ```
 
 ### Fix 3: Add context normalization
-File: `custom/decoder/model.py`
+File: `JiT/decoder/model.py`
 
 In `__init__`, after `self.blocks` (line 54):
 ```python
@@ -239,7 +239,7 @@ ctx_tokens = self.ctx_norm(torch.cat([dino, latent_tokens], dim=1))
 ```
 
 ### Fix 4 (future): Stream-specific noise
-File: `custom/decoder/gan.py`, lines 39-56
+File: `JiT/decoder/gan.py`, lines 39-56
 
 Replace shared sigma with per-stream scaling:
 ```python

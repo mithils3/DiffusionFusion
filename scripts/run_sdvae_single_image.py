@@ -25,7 +25,7 @@ def parse_args() -> argparse.Namespace:
         "--vae-model",
         type=str,
         default="stabilityai/sdxl-vae",
-        help="Diffusers VAE model id or local path. Defaults to the custom repo baseline.",
+        help="Diffusers VAE model id or local path. Defaults to the JiT repo baseline.",
     )
     parser.add_argument(
         "--device",

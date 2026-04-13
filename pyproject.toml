@@ -9,4 +9,4 @@ description = "Local packaging for DiffusionFusion modules."
 requires-python = ">=3.10"
 
 [tool.setuptools.packages.find]
-include = ["custom*"]
+include = ["JiT*"]
