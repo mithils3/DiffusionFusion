@@ -164,6 +164,112 @@ class Attention(nn.Module):
         return x
 
 
+def apply_stream_rope(x, rope, num_patches):
+    if rope is None or num_patches <= 0:
+        return x
+
+    num_prefix = x.shape[2] - num_patches
+    if num_prefix < 0:
+        raise ValueError(
+            f"Cannot apply RoPE to {num_patches} spatial tokens when the sequence only has "
+            f"{x.shape[2]} tokens."
+        )
+    if num_prefix == 0:
+        return rope(x)
+    return torch.cat([x[:, :, :num_prefix], rope(x[:, :, num_prefix:])], dim=2)
+
+
+class StreamAttention(nn.Module):
+    def __init__(self, dim, num_heads=8, qkv_bias=True, qk_norm=True, attn_drop=0.0, proj_drop=0.0):
+        super().__init__()
+        if dim % num_heads != 0:
+            raise ValueError(
+                f"Attention dim ({dim}) must be divisible by num_heads ({num_heads})."
+            )
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+
+        self.q_norm = RMSNorm(self.head_dim) if qk_norm else nn.Identity()
+        self.k_norm = RMSNorm(self.head_dim) if qk_norm else nn.Identity()
+
+        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        self.attn_drop = nn.Dropout(attn_drop)
+        self.proj = nn.Linear(dim, dim)
+        self.proj_drop = nn.Dropout(proj_drop)
+
+    def forward(self, x, rope=None, num_patches=0):
+        bsz, seq_len, channels = x.shape
+        qkv = self.qkv(x).reshape(bsz, seq_len, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+
+        q = apply_stream_rope(self.q_norm(q), rope, num_patches)
+        k = apply_stream_rope(self.k_norm(k), rope, num_patches)
+
+        x = torch.nn.functional.scaled_dot_product_attention(
+            q, k, v, dropout_p=self.attn_drop.p if self.training else 0.0
+        )
+        x = x.transpose(1, 2).reshape(bsz, seq_len, channels)
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        return x
+
+
+class CrossStreamAttention(nn.Module):
+    def __init__(self, dim, num_heads=8, qkv_bias=True, qk_norm=True, attn_drop=0.0, proj_drop=0.0):
+        super().__init__()
+        if dim % num_heads != 0:
+            raise ValueError(
+                f"Attention dim ({dim}) must be divisible by num_heads ({num_heads})."
+            )
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+
+        self.q_norm = RMSNorm(self.head_dim) if qk_norm else nn.Identity()
+        self.k_norm = RMSNorm(self.head_dim) if qk_norm else nn.Identity()
+
+        self.q_proj = nn.Linear(dim, dim, bias=qkv_bias)
+        self.kv_proj = nn.Linear(dim, dim * 2, bias=qkv_bias)
+        self.attn_drop = nn.Dropout(attn_drop)
+        self.proj = nn.Linear(dim, dim)
+        self.proj_drop = nn.Dropout(proj_drop)
+
+    def forward(
+        self,
+        query,
+        context,
+        *,
+        query_rope=None,
+        query_num_patches=0,
+        context_rope=None,
+        context_num_patches=0,
+    ):
+        bsz, query_len, channels = query.shape
+        ctx_bsz, ctx_len, ctx_channels = context.shape
+        if bsz != ctx_bsz:
+            raise ValueError(
+                f"Batch size mismatch between query ({bsz}) and context ({ctx_bsz})."
+            )
+        if channels != ctx_channels:
+            raise ValueError(
+                f"Hidden size mismatch between query ({channels}) and context ({ctx_channels})."
+            )
+
+        q = self.q_proj(query).reshape(bsz, query_len, self.num_heads, self.head_dim).transpose(1, 2)
+        kv = self.kv_proj(context).reshape(bsz, ctx_len, 2, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        k, v = kv[0], kv[1]
+
+        q = apply_stream_rope(self.q_norm(q), query_rope, query_num_patches)
+        k = apply_stream_rope(self.k_norm(k), context_rope, context_num_patches)
+
+        x = torch.nn.functional.scaled_dot_product_attention(
+            q, k, v, dropout_p=self.attn_drop.p if self.training else 0.0
+        )
+        x = x.transpose(1, 2).reshape(bsz, query_len, channels)
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        return x
+
+
 class SwiGLUFFN(nn.Module):
     def __init__(
         self,
@@ -252,6 +358,104 @@ class JiTBlock(nn.Module):
             gate_mlp.unsqueeze(
                 1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
         return x
+
+
+class DualStreamLocalBlock(nn.Module):
+    def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, attn_drop=0.0, proj_drop=0.0):
+        super().__init__()
+        self.norm1 = RMSNorm(hidden_size, eps=1e-6)
+        self.attn = StreamAttention(
+            hidden_size,
+            num_heads=num_heads,
+            qkv_bias=True,
+            qk_norm=True,
+            attn_drop=attn_drop,
+            proj_drop=proj_drop,
+        )
+        self.norm2 = RMSNorm(hidden_size, eps=1e-6)
+        mlp_hidden_dim = int(hidden_size * mlp_ratio)
+        self.mlp = SwiGLUFFN(hidden_size, mlp_hidden_dim, drop=proj_drop)
+        self.adaLN_modulation = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(hidden_size, 6 * hidden_size, bias=True)
+        )
+
+    def forward(self, x, c, feat_rope=None, num_patches=0):
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(
+            c).chunk(6, dim=-1)
+        x = x + gate_msa.unsqueeze(1) * self.attn(
+            modulate(self.norm1(x), shift_msa, scale_msa),
+            rope=feat_rope,
+            num_patches=num_patches,
+        )
+        x = x + gate_mlp.unsqueeze(1) * self.mlp(
+            modulate(self.norm2(x), shift_mlp, scale_mlp)
+        )
+        return x
+
+
+class CrossFusionDirection(nn.Module):
+    def __init__(self, hidden_size, num_heads, attn_drop=0.0, proj_drop=0.0):
+        super().__init__()
+        self.query_norm = RMSNorm(hidden_size, eps=1e-6)
+        self.context_norm = RMSNorm(hidden_size, eps=1e-6)
+        self.cross_attn = CrossStreamAttention(
+            hidden_size,
+            num_heads=num_heads,
+            qkv_bias=True,
+            qk_norm=True,
+            attn_drop=attn_drop,
+            proj_drop=proj_drop,
+        )
+        self.adaLN_modulation = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(hidden_size, 3 * hidden_size, bias=True)
+        )
+
+    def forward(self, x, context, c, feat_rope=None, num_patches=0, context_num_patches=0):
+        shift, scale, gate = self.adaLN_modulation(c).chunk(3, dim=-1)
+        query = modulate(self.query_norm(x), shift, scale)
+        context = self.context_norm(context)
+        return x + gate.unsqueeze(1) * self.cross_attn(
+            query,
+            context,
+            query_rope=feat_rope,
+            query_num_patches=num_patches,
+            context_rope=feat_rope,
+            context_num_patches=context_num_patches,
+        )
+
+
+class CrossFusionBlock(nn.Module):
+    def __init__(self, hidden_size, num_heads, attn_drop=0.0, proj_drop=0.0):
+        super().__init__()
+        self.latent_from_dino = CrossFusionDirection(
+            hidden_size, num_heads, attn_drop=attn_drop, proj_drop=proj_drop
+        )
+        self.dino_from_latent = CrossFusionDirection(
+            hidden_size, num_heads, attn_drop=attn_drop, proj_drop=proj_drop
+        )
+
+    def forward(self, latent, dino, c, feat_rope=None, latent_num_patches=0, dino_num_patches=0):
+        latent_snapshot = latent
+        dino_snapshot = dino
+        latent = self.latent_from_dino(
+            latent_snapshot,
+            dino_snapshot,
+            c,
+            feat_rope=feat_rope,
+            num_patches=latent_num_patches,
+            context_num_patches=dino_num_patches,
+        )
+        dino = self.dino_from_latent(
+            dino_snapshot,
+            latent_snapshot,
+            c,
+            feat_rope=feat_rope,
+            num_patches=dino_num_patches,
+            context_num_patches=latent_num_patches,
+        )
+        return latent, dino
 
 
 class JiT(nn.Module):
@@ -458,6 +662,252 @@ class JiT(nn.Module):
         return output, dino_out
 
 
+class JiTDualStream(nn.Module):
+    """
+    Dual-stream JiT with separate latent/DINO towers and periodic cross-fusion.
+    """
+
+    def __init__(
+        self,
+        input_size=256,
+        patch_size=16,
+        in_channels=3,
+        hidden_size=896,
+        depth=12,
+        num_heads=16,
+        mlp_ratio=4.0,
+        attn_drop=0.0,
+        proj_drop=0.0,
+        num_classes=1000,
+        bottleneck_dim=128,
+        in_context_len=32,
+        in_context_start=0,
+        dino_hidden_size=768,
+        dino_patches=16,
+        cross_every=4,
+        cross_start=4,
+    ):
+        super().__init__()
+        if hidden_size % num_heads != 0:
+            raise ValueError(
+                f"JiT hidden_size ({hidden_size}) must be divisible by num_heads ({num_heads})."
+            )
+        head_dim = hidden_size // num_heads
+        if head_dim % 2 != 0:
+            raise ValueError(
+                f"JiT attention head dimension ({head_dim}) must be even for rotary embeddings."
+            )
+        if cross_every <= 0:
+            raise ValueError(f"cross_every must be positive, got {cross_every}.")
+
+        self.in_channels = in_channels
+        self.out_channels = in_channels
+        self.patch_size = patch_size
+        self.num_heads = num_heads
+        self.hidden_size = hidden_size
+        self.depth = depth
+        self.input_size = input_size
+        self.in_context_len = in_context_len
+        self.in_context_start = in_context_start
+        self.num_classes = num_classes
+        self.dino_hidden_size = dino_hidden_size
+        self.dino_patches = dino_patches
+        self.cross_every = cross_every
+        self.cross_start = cross_start
+
+        self.t_embedder = TimestepEmbedder(hidden_size)
+        self.y_embedder = LabelEmbedder(num_classes, hidden_size)
+
+        self.x_embedder = BottleneckPatchEmbed(
+            input_size, patch_size, in_channels, bottleneck_dim, hidden_size, bias=True
+        )
+        self.dino_embedder = nn.Identity() if dino_hidden_size == hidden_size else nn.Linear(
+            dino_hidden_size, hidden_size, bias=True
+        )
+
+        num_patches = self.x_embedder.num_patches
+        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, hidden_size), requires_grad=False)
+        if self.in_context_len > 0:
+            self.latent_in_context_posemb = nn.Parameter(
+                torch.zeros(1, self.in_context_len, hidden_size), requires_grad=True
+            )
+            self.dino_in_context_posemb = nn.Parameter(
+                torch.zeros(1, self.in_context_len, hidden_size), requires_grad=True
+            )
+            torch.nn.init.normal_(self.latent_in_context_posemb, std=.02)
+            torch.nn.init.normal_(self.dino_in_context_posemb, std=.02)
+        else:
+            self.latent_in_context_posemb = None
+            self.dino_in_context_posemb = None
+
+        half_head_dim = head_dim // 2
+        hw_seq_len = input_size // patch_size
+        self.feat_rope = VisionRotaryEmbeddingFast(
+            dim=half_head_dim,
+            pt_seq_len=hw_seq_len,
+            num_cls_token=0
+        )
+
+        self.latent_blocks = nn.ModuleList([
+            DualStreamLocalBlock(
+                hidden_size,
+                num_heads,
+                mlp_ratio=mlp_ratio,
+                attn_drop=attn_drop if (depth // 4 * 3 > i >= depth // 4) else 0.0,
+                proj_drop=proj_drop if (depth // 4 * 3 > i >= depth // 4) else 0.0,
+            )
+            for i in range(depth)
+        ])
+        self.dino_blocks = nn.ModuleList([
+            DualStreamLocalBlock(
+                hidden_size,
+                num_heads,
+                mlp_ratio=mlp_ratio,
+                attn_drop=attn_drop if (depth // 4 * 3 > i >= depth // 4) else 0.0,
+                proj_drop=proj_drop if (depth // 4 * 3 > i >= depth // 4) else 0.0,
+            )
+            for i in range(depth)
+        ])
+
+        self.cross_fusion_layers = tuple(
+            i for i in range(depth) if i >= cross_start and (i - cross_start) % cross_every == 0
+        )
+        self.cross_fusion_blocks = nn.ModuleDict({
+            str(i): CrossFusionBlock(
+                hidden_size,
+                num_heads,
+                attn_drop=attn_drop if (depth // 4 * 3 > i >= depth // 4) else 0.0,
+                proj_drop=proj_drop if (depth // 4 * 3 > i >= depth // 4) else 0.0,
+            )
+            for i in self.cross_fusion_layers
+        })
+
+        self.latent_final_layer = FinalLayer(hidden_size, patch_size, self.out_channels)
+        self.dino_final_layer = DinoFinalLayer(hidden_size, dino_hidden_size, self.out_channels)
+        self.initialize_weights()
+
+    def initialize_weights(self):
+        def _basic_init(module):
+            if isinstance(module, nn.Linear):
+                torch.nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
+
+        self.apply(_basic_init)
+
+        pos_embed = get_2d_sincos_pos_embed(
+            self.pos_embed.shape[-1], int(self.x_embedder.num_patches ** 0.5)
+        )
+        self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
+
+        w1 = self.x_embedder.proj1.weight.data
+        nn.init.xavier_uniform_(w1.view([w1.shape[0], -1]))
+        w2 = self.x_embedder.proj2.weight.data
+        nn.init.xavier_uniform_(w2.view([w2.shape[0], -1]))
+        nn.init.constant_(self.x_embedder.proj2.bias, 0)
+        if isinstance(self.dino_embedder, nn.Linear):
+            wd = self.dino_embedder.weight.data
+            nn.init.xavier_uniform_(wd.view([wd.shape[0], -1]))
+            nn.init.constant_(self.dino_embedder.bias, 0)
+
+        nn.init.normal_(self.y_embedder.embedding_table.weight, std=0.02)
+        nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
+        nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
+
+        for block in list(self.latent_blocks) + list(self.dino_blocks):
+            nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
+            nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
+
+        for block in self.cross_fusion_blocks.values():
+            nn.init.constant_(block.latent_from_dino.adaLN_modulation[-1].weight, 0)
+            nn.init.constant_(block.latent_from_dino.adaLN_modulation[-1].bias, 0)
+            nn.init.constant_(block.dino_from_latent.adaLN_modulation[-1].weight, 0)
+            nn.init.constant_(block.dino_from_latent.adaLN_modulation[-1].bias, 0)
+
+        nn.init.constant_(self.latent_final_layer.adaLN_modulation[-1].weight, 0)
+        nn.init.constant_(self.latent_final_layer.adaLN_modulation[-1].bias, 0)
+        nn.init.constant_(self.latent_final_layer.linear.weight, 0)
+        nn.init.constant_(self.latent_final_layer.linear.bias, 0)
+        nn.init.constant_(self.dino_final_layer.linear.weight, 0)
+        nn.init.constant_(self.dino_final_layer.linear.bias, 0)
+        nn.init.constant_(self.dino_final_layer.adaLN_modulation[-1].weight, 0)
+        nn.init.constant_(self.dino_final_layer.adaLN_modulation[-1].bias, 0)
+
+    def unpatchify(self, x, p):
+        c = self.out_channels
+        h = w = int(x.shape[1] ** 0.5)
+        assert h * w == x.shape[1]
+
+        x = x.reshape(shape=(x.shape[0], h, w, p, p, c))
+        x = torch.einsum('nhwpqc->nchpwq', x)
+        imgs = x.reshape(shape=(x.shape[0], c, h * p, h * p))
+        return imgs
+
+    def _build_context_tokens(self, y_emb):
+        base_tokens = y_emb.unsqueeze(1).repeat(1, self.in_context_len, 1)
+        latent_context = base_tokens + self.latent_in_context_posemb
+        dino_context = base_tokens + self.dino_in_context_posemb
+        return latent_context, dino_context
+
+    def forward(self, latent, dino_features, t, y):
+        t_emb = self.t_embedder(t)
+        y_emb = self.y_embedder(y)
+        c = t_emb + y_emb
+
+        latent_tokens = self.x_embedder(latent)
+        dino_tokens = dino_features.flatten(2).transpose(1, 2)
+        if dino_tokens.shape[1] != latent_tokens.shape[1]:
+            raise ValueError(
+                f"DINO patch grid ({dino_tokens.shape[1]} tokens) must match latent patch grid "
+                f"({latent_tokens.shape[1]} tokens). Check `dino_patches`, `input_size`, and `patch_size`."
+            )
+        dino_tokens = self.dino_embedder(dino_tokens)
+        latent_tokens = latent_tokens + self.pos_embed
+        dino_tokens = dino_tokens + self.pos_embed
+        num_patches = latent_tokens.shape[1]
+
+        context_inserted = False
+        if self.in_context_len > 0 and self.in_context_start == 0:
+            latent_context, dino_context = self._build_context_tokens(y_emb)
+            latent_tokens = torch.cat([latent_context, latent_tokens], dim=1)
+            dino_tokens = torch.cat([dino_context, dino_tokens], dim=1)
+            context_inserted = True
+
+        for i, (latent_block, dino_block) in enumerate(zip(self.latent_blocks, self.dino_blocks)):
+            if self.in_context_len > 0 and not context_inserted and i == self.in_context_start:
+                latent_context, dino_context = self._build_context_tokens(y_emb)
+                latent_tokens = torch.cat([latent_context, latent_tokens], dim=1)
+                dino_tokens = torch.cat([dino_context, dino_tokens], dim=1)
+                context_inserted = True
+
+            latent_tokens = latent_block(latent_tokens, c, self.feat_rope, num_patches=num_patches)
+            dino_tokens = dino_block(dino_tokens, c, self.feat_rope, num_patches=num_patches)
+
+            fusion_key = str(i)
+            if fusion_key in self.cross_fusion_blocks:
+                fusion_block = self.cross_fusion_blocks[fusion_key]
+                latent_tokens, dino_tokens = fusion_block(
+                    latent_tokens,
+                    dino_tokens,
+                    c,
+                    feat_rope=self.feat_rope,
+                    latent_num_patches=num_patches,
+                    dino_num_patches=num_patches,
+                )
+
+        prefix_len = self.in_context_len if context_inserted else 0
+        latent_tokens = latent_tokens[:, prefix_len:]
+        dino_tokens = dino_tokens[:, prefix_len:]
+
+        latent_tokens = self.latent_final_layer(latent_tokens, c)
+        dino_tokens = self.dino_final_layer(dino_tokens, c)
+        output = self.unpatchify(latent_tokens, self.patch_size)
+        dino_tokens = dino_tokens.transpose(1, 2).view(
+            -1, self.dino_hidden_size, self.dino_patches, self.dino_patches
+        )
+        return output, dino_tokens
+
+
 def JiT_B_16(**kwargs):
     return JiT(depth=12, hidden_size=768, num_heads=12,
                bottleneck_dim=128, in_context_len=32, in_context_start=4, patch_size=16, **kwargs)
@@ -468,6 +918,23 @@ def JiT_B_2_4C(**kwargs):
     kwargs.setdefault("in_channels", 4)
     return JiT(depth=12, hidden_size=1024, num_heads=16,
                bottleneck_dim=128, in_context_len=32, in_context_start=4, patch_size=2, **kwargs)
+
+
+def JiT_Dual_B_2_4C_896(**kwargs):
+    kwargs.setdefault("input_size", 32)
+    kwargs.setdefault("in_channels", 4)
+    kwargs.setdefault("in_context_len", 32)
+    kwargs.setdefault("in_context_start", 0)
+    kwargs.setdefault("cross_every", 4)
+    kwargs.setdefault("cross_start", 4)
+    return JiTDualStream(
+        depth=12,
+        hidden_size=896,
+        num_heads=16,
+        bottleneck_dim=128,
+        patch_size=2,
+        **kwargs,
+    )
 
 
 def JiT_L_2_4C(**kwargs):
@@ -521,6 +988,7 @@ JiT_models = {
     'JiT-H/16': JiT_H_16,
     'JiT-H/32': JiT_H_32,
     'JiT-B/2-4C': JiT_B_2_4C,
+    'JiT-Dual-B/2-4C-896': JiT_Dual_B_2_4C_896,
     'JiT-B/4-4C': JiT_B_4_4C,
     'JiT-L/2-4C': JiT_L_2_4C,
     'JiT-L/4-4C': JiT_L_4_4C,

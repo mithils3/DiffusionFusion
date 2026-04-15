@@ -30,6 +30,8 @@ EVAL_FREQ="${EVAL_FREQ:-20}"
 EPOCHS="${EPOCHS:-80}"
 LR_SCHEDULE="${LR_SCHEDULE:-cosine}"
 MIN_LR="${MIN_LR:-1e-5}"
+BATCH_SIZE="${BATCH_SIZE:-128}"
+ACCUM_ITER="${ACCUM_ITER:-2}"
 mkdir -p "${OUTPUT_DIR}"
 OMP_NUM_THREADS=16 torchrun \
 --nproc_per_node=auto \
@@ -41,8 +43,8 @@ main_jit.py \
 --P_mean -0.8 \
 --P_std 0.8 \
 --noise_scale 1.0 \
---batch_size 64 \
---accum_iter 4 \
+--batch_size "${BATCH_SIZE}" \
+--accum_iter "${ACCUM_ITER}" \
 --blr 5e-5 \
 --epochs "${EPOCHS}" \
 --warmup_epochs 5 \
