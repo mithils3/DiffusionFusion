@@ -91,25 +91,6 @@ def get_args_parser():
                         help='Weight applied to the latent denoising loss')
     parser.add_argument('--dino_loss_weight', default=1.0, type=float,
                         help='Weight applied to the DINO denoising loss')
-    parser.add_argument('--latent_forcing', action='store_true',
-                        help='Enable a cascaded two-time schedule inspired by Latent Forcing')
-    parser.add_argument('--lf_order', default='dino_first', type=str,
-                        choices=['dino_first', 'latent_first'],
-                        help='Which stream denoises first under latent forcing')
-    parser.add_argument('--lf_phase_prob', default=0.4, type=float,
-                        help='Probability of sampling a first-phase training step')
-    parser.add_argument('--lf_dino_mean', default=-1.2, type=float,
-                        help='Logit-normal mean for DINO-phase timesteps under latent forcing')
-    parser.add_argument('--lf_dino_std', default=1.0, type=float,
-                        help='Logit-normal std for DINO-phase timesteps under latent forcing')
-    parser.add_argument('--lf_latent_mean', default=-0.8, type=float,
-                        help='Logit-normal mean for latent-phase timesteps under latent forcing')
-    parser.add_argument('--lf_latent_std', default=0.8, type=float,
-                        help='Logit-normal std for latent-phase timesteps under latent forcing')
-    parser.add_argument('--lf_context_beta', default=0.25, type=float,
-                        help='Train-time max noise added to the already-denoised context stream during second-phase steps')
-    parser.add_argument('--lf_first_phase_steps', default=25, type=int,
-                        help='Number of sampling steps allocated to the first latent-forcing phase')
 
     parser.add_argument('--seed', default=0, type=int)
     parser.add_argument('--start_epoch', default=0, type=int, metavar='N',

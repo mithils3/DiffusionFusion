@@ -276,7 +276,6 @@ class JiT(nn.Module):
         in_context_start=8,
         dino_hidden_size=768,
         dino_patches=16,
-        dual_time_cond=False,
     ):
         super().__init__()
         if hidden_size % num_heads != 0:
@@ -299,14 +298,9 @@ class JiT(nn.Module):
         self.num_classes = num_classes
         self.dino_hidden_size = dino_hidden_size
         self.dino_patches = dino_patches
-        self.dual_time_cond = dual_time_cond
 
         # time and class embed
-        if self.dual_time_cond:
-            self.t_lat_embedder = TimestepEmbedder(hidden_size)
-            self.t_dino_embedder = TimestepEmbedder(hidden_size)
-        else:
-            self.t_embedder = TimestepEmbedder(hidden_size)
+        self.t_embedder = TimestepEmbedder(hidden_size)
         self.y_embedder = LabelEmbedder(num_classes, hidden_size)
 
         # linear embed
@@ -379,13 +373,8 @@ class JiT(nn.Module):
         # Initialize label embedding table:
         nn.init.normal_(self.y_embedder.embedding_table.weight, std=0.02)
 
-        if self.dual_time_cond:
-            for embedder in (self.t_lat_embedder, self.t_dino_embedder):
-                nn.init.normal_(embedder.mlp[0].weight, std=0.02)
-                nn.init.normal_(embedder.mlp[2].weight, std=0.02)
-        else:
-            nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
-            nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
+        nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
+        nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
 
         # Zero-out adaLN modulation layers:
         for block in self.blocks:
@@ -418,19 +407,14 @@ class JiT(nn.Module):
         imgs = x.reshape(shape=(x.shape[0], c, h * p, h * p))
         return imgs
 
-    def forward(self, latent, dino_features, t, y, t_dino=None):
+    def forward(self, latent, dino_features, t, y):
         """
         x: (N, C, H, W)
         t: (N,)
         y: (N,)
         """
         # class and time embeddings
-        if t_dino is None:
-            t_dino = t
-        if self.dual_time_cond:
-            t_emb = self.t_lat_embedder(t) + self.t_dino_embedder(t_dino)
-        else:
-            t_emb = self.t_embedder(t)
+        t_emb = self.t_embedder(t)
         y_emb = self.y_embedder(y)
         c = t_emb + y_emb
 

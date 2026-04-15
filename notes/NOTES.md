@@ -6,8 +6,6 @@ https://huggingface.co/stabilityai/sdxl-vae - VAE to use for JiT VAE
 
 ## JiT Notes
 
-- `notes/LATENT_FORCING_JIT_PLAN.md`: current latent-forcing direction for JiT.
-
 ## Metrics to keep in mind 
 
 ### FID (Fréchet Inception Distance)
