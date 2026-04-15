@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -J JiT_cosine
-#SBATCH -A bgnp-dtai-gh
+#SBATCH -A betw-dtai-gh
 #SBATCH -p ghx4
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
