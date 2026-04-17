@@ -12,8 +12,13 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import timm
 
 from JiT.decoder import Decoder
+
+
+_DEFAULT_IMAGE_MEAN = (0.485, 0.456, 0.406)
+_DEFAULT_IMAGE_STD = (0.229, 0.224, 0.225)
 
 
 def load_decoder_for_eval(
@@ -62,9 +67,45 @@ def load_decoder_for_eval(
 
     state_dict = _resolve_state_dict(payload[key], model)
     model.load_state_dict(state_dict, strict=True)
+    output_mean, output_std = _resolve_decoder_output_stats(ckpt_args)
+    model._output_mean = output_mean
+    model._output_std = output_std
     model.to(device)
     model.eval()
     return model
+
+
+def _resolve_decoder_output_stats(
+    ckpt_args: argparse.Namespace,
+) -> tuple[tuple[float, ...], tuple[float, ...]]:
+    image_mean = getattr(ckpt_args, "image_mean", None)
+    image_std = getattr(ckpt_args, "image_std", None)
+    if image_mean is not None and image_std is not None:
+        return tuple(float(value) for value in image_mean), tuple(float(value) for value in image_std)
+
+    model_name = getattr(ckpt_args, "image_model_name", None)
+    if model_name:
+        transform_model = timm.create_model(
+            model_name,
+            pretrained=False,
+            features_only=True,
+        )
+        try:
+            data_config = timm.data.resolve_model_data_config(transform_model)
+        finally:
+            del transform_model
+
+        mean = data_config.get("mean")
+        std = data_config.get("std")
+        if mean is not None and std is not None:
+            return (
+                tuple(float(value) for value in mean),
+                tuple(float(value) for value in std),
+            )
+
+    # Older checkpoints may not record the image model config. Fall back to the
+    # ImageNet normalization used by the current decoder training recipe.
+    return _DEFAULT_IMAGE_MEAN, _DEFAULT_IMAGE_STD
 
 
 def _resolve_state_dict(
@@ -119,5 +160,23 @@ def decode_with_decoder(
     ctx = torch.autocast("cuda", dtype=torch.bfloat16) if device.type == "cuda" else nullcontext()
     with ctx:
         images = decoder.generate(latent, dino)
-    images = torch.clamp(127.5 * images + 128.0, 0, 255)
-    return images.permute(0, 2, 3, 1).to("cpu", dtype=torch.uint8).numpy()
+    return _decoder_images_to_uint8(images, decoder)
+
+
+def _decoder_images_to_uint8(
+    images: torch.Tensor,
+    decoder: Decoder,
+) -> np.ndarray:
+    images = images.detach().float().cpu()
+    mean = torch.as_tensor(
+        getattr(decoder, "_output_mean", _DEFAULT_IMAGE_MEAN),
+        dtype=images.dtype,
+    ).view(1, -1, 1, 1)
+    std = torch.as_tensor(
+        getattr(decoder, "_output_std", _DEFAULT_IMAGE_STD),
+        dtype=images.dtype,
+    ).view(1, -1, 1, 1)
+    images = images * std + mean
+    images = images.clamp_(0.0, 1.0)
+    images = images.mul(255.0).round().to(torch.uint8)
+    return images.permute(0, 2, 3, 1).numpy()
