@@ -24,15 +24,15 @@ cd /u/msalunkhe/DiffusionFusion/JiT
 git pull
 
 IMAGENET_PATH="${IMAGENET_PATH:-/work/hdd/bgnp/msalunkhe/data/imagenet/}"
-TRAIN_OUTPUT_DIR="${TRAIN_OUTPUT_DIR:-/work/nvme/bgnp/msalunkhe/outputs/jit_base_patch_size_2_higher_lr}"
+TRAIN_OUTPUT_DIR="${TRAIN_OUTPUT_DIR:-/work/nvme/bgnp/msalunkhe/outputs/jit_base_patch_size_2_cosine_80ep}"
 RESUME_DIR="${RESUME_DIR:-${TRAIN_OUTPUT_DIR}}"
 OUTPUT_DIR="${OUTPUT_DIR:-${TRAIN_OUTPUT_DIR}/eval}"
 DECODER_CHECKPOINT="${DECODER_CHECKPOINT:-/work/nvme/bgnp/msalunkhe/outputs/jit_decoder_small_gan_lower_noise/checkpoint-last.pth}"
 FID_STATS_PATH="${FID_STATS_PATH:-/u/msalunkhe/DiffusionFusion/JiT/fid_stats/jit_in256_stats.npz}"
 
-MODEL="${MODEL:-JiT-B/2-4C}"
+MODEL="${MODEL:-JiT-Dual-B/2-4C-896}"
 BATCH_SIZE="${BATCH_SIZE:-128}"
-GEN_BSZ="${GEN_BSZ:-128}"
+GEN_BSZ="${GEN_BSZ:-64}"
 NUM_IMAGES="${NUM_IMAGES:-50000}"
 CFG="${CFG:-2.9}"
 INTERVAL_MIN="${INTERVAL_MIN:-0.1}"
