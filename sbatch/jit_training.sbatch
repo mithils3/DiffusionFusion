@@ -25,13 +25,14 @@ IMAGENET_PATH="/work/hdd/bgnp/msalunkhe/data/imagenet/"
 OUTPUT_DIR="/work/nvme/bgnp/msalunkhe/outputs/jit_base_patch_size_2_cosine_80ep"
 WANDB_RUN_NAME="${WANDB_RUN_NAME:-jit_base_patch_size_2_cosine_80ep}"
 FID_STATS_PATH="${FID_STATS_PATH:-/u/msalunkhe/DiffusionFusion/JiT/fid_stats/jit_in256_stats.npz}"
-NUM_IMAGES="${NUM_IMAGES:-5000}"
+NUM_IMAGES="${NUM_IMAGES:-10000}"
 EVAL_FREQ="${EVAL_FREQ:-20}"
-EPOCHS="${EPOCHS:-80}"
+EPOCHS="${EPOCHS:-180}"
 LR_SCHEDULE="${LR_SCHEDULE:-cosine}"
 MIN_LR="${MIN_LR:-1e-5}"
 BATCH_SIZE="${BATCH_SIZE:-128}"
 ACCUM_ITER="${ACCUM_ITER:-2}"
+RESUME_DIR="${RESUME_DIR:-${OUTPUT_DIR}}"
 mkdir -p "${OUTPUT_DIR}"
 OMP_NUM_THREADS=16 torchrun \
 --nproc_per_node=auto \
@@ -55,6 +56,7 @@ main_jit.py \
 --cfg 2.9 \
 --interval_min 0.1 \
 --interval_max 1.0 \
+--resume "${RESUME_DIR}" \
 --output_dir ${OUTPUT_DIR} \
 --wandb_run_name "${WANDB_RUN_NAME}" \
 --data_path ${IMAGENET_PATH} \
