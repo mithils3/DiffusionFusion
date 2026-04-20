@@ -7,7 +7,7 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --gpus-per-node=4
 #SBATCH --mem=256G
-#SBATCH --time=25:00:00
+#SBATCH --time=48:00:00
 #SBATCH -o slurm-%j.out
 #SBATCH -e slurm-%j.err
 #SBATCH --mail-user=mithils3@illinois.edu
@@ -22,8 +22,8 @@ module load cuda/12.9.0
 source /u/msalunkhe/.venv/bin/activate
 cd /u/msalunkhe/DiffusionFusion/JiT
 IMAGENET_PATH="/work/hdd/bgnp/msalunkhe/data/imagenet/"
-OUTPUT_DIR="/work/nvme/bgnp/msalunkhe/outputs/jit_base_patch_size_2_cosine_80ep"
-WANDB_RUN_NAME="${WANDB_RUN_NAME:-jit_base_patch_size_2_cosine_80ep}"
+OUTPUT_DIR="/work/nvme/bgnp/msalunkhe/outputs/jit_base_patch_size_2_cosine_180ep"
+WANDB_RUN_NAME="${WANDB_RUN_NAME:-jit_base_patch_size_2_cosine_180ep}"
 FID_STATS_PATH="${FID_STATS_PATH:-/u/msalunkhe/DiffusionFusion/JiT/fid_stats/jit_in256_stats.npz}"
 NUM_IMAGES="${NUM_IMAGES:-10000}"
 EVAL_FREQ="${EVAL_FREQ:-20}"
@@ -32,7 +32,6 @@ LR_SCHEDULE="${LR_SCHEDULE:-cosine}"
 MIN_LR="${MIN_LR:-1e-5}"
 BATCH_SIZE="${BATCH_SIZE:-128}"
 ACCUM_ITER="${ACCUM_ITER:-2}"
-RESUME_DIR="${RESUME_DIR:-${OUTPUT_DIR}}"
 mkdir -p "${OUTPUT_DIR}"
 OMP_NUM_THREADS=16 torchrun \
 --nproc_per_node=auto \
@@ -51,12 +50,11 @@ main_jit.py \
 --warmup_epochs 5 \
 --lr_schedule "${LR_SCHEDULE}" \
 --min_lr "${MIN_LR}" \
-    --gen_bsz 64 \
+    --gen_bsz 128 \
 --num_images "${NUM_IMAGES}" \
 --cfg 2.9 \
 --interval_min 0.1 \
 --interval_max 1.0 \
---resume "${RESUME_DIR}" \
 --output_dir ${OUTPUT_DIR} \
 --wandb_run_name "${WANDB_RUN_NAME}" \
 --data_path ${IMAGENET_PATH} \
