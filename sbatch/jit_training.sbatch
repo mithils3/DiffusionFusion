@@ -17,10 +17,51 @@ set -euo pipefail
 
 
 module load python/3.11.9
-module load cuda/12.9.0
+module load cuda/13.1.1
 
 source /u/msalunkhe/.venv/bin/activate
 cd /u/msalunkhe/DiffusionFusion/JiT
+
+NPROC_PER_NODE="${NPROC_PER_NODE:-${SLURM_GPUS_ON_NODE:-4}}"
+export CUDA_DEVICE_ORDER=PCI_BUS_ID
+export PYTHONFAULTHANDLER=1
+
+echo "===== Slurm/CUDA preflight ====="
+echo "date=$(date)"
+echo "host=$(hostname)"
+echo "job_id=${SLURM_JOB_ID:-unset}"
+echo "node_list=${SLURM_JOB_NODELIST:-unset}"
+echo "slurm_gpus_on_node=${SLURM_GPUS_ON_NODE:-unset}"
+echo "cuda_visible_devices=${CUDA_VISIBLE_DEVICES:-unset}"
+echo "nproc_per_node=${NPROC_PER_NODE}"
+echo "python=$(which python)"
+echo "torchrun=$(which torchrun)"
+module list
+nvidia-smi
+
+python - <<'PY'
+import os
+import sys
+import torch
+
+print(f"PyTorch {torch.__version__}, built for CUDA {torch.version.cuda}")
+print(f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', 'unset')}")
+try:
+    available = torch.cuda.is_available()
+    device_count = torch.cuda.device_count()
+except Exception as exc:
+    sys.exit(f"CUDA preflight failed before torchrun: {type(exc).__name__}: {exc}")
+
+print(f"torch.cuda.is_available()={available}")
+print(f"torch.cuda.device_count()={device_count}")
+if device_count < 1:
+    sys.exit("CUDA preflight failed before torchrun: no CUDA devices are visible to PyTorch")
+for idx in range(device_count):
+    print(f"cuda:{idx}={torch.cuda.get_device_name(idx)}")
+PY
+echo "===== End preflight ====="
+
+
 IMAGENET_PATH="/work/hdd/bgnp/msalunkhe/data/imagenet/"
 OUTPUT_DIR="/work/nvme/bgnp/msalunkhe/outputs/jit_base_patch_size_2_cosine_180ep"
 WANDB_RUN_NAME="${WANDB_RUN_NAME:-jit_base_patch_size_2_cosine_180ep}"
@@ -34,7 +75,7 @@ BATCH_SIZE="${BATCH_SIZE:-128}"
 ACCUM_ITER="${ACCUM_ITER:-2}"
 mkdir -p "${OUTPUT_DIR}"
 OMP_NUM_THREADS=16 torchrun \
---nproc_per_node=auto \
+--nproc_per_node="${NPROC_PER_NODE}" \
 --nnodes=1 \
 --node_rank=0 \
 main_jit.py \

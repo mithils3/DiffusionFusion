@@ -19,13 +19,14 @@ module load cuda/12.9.0
 source /u/msalunkhe/.venv/bin/activate
 cd /u/msalunkhe/DiffusionFusion
 git pull
+NPROC_PER_NODE="${NPROC_PER_NODE:-${SLURM_GPUS_ON_NODE:-2}}"
 
 IMAGE_DATA_PATH="ILSVRC/imagenet-1k"
 OUTPUT_DIR="/work/nvme/bgnp/msalunkhe/outputs/sdxl_vae_eval"
 mkdir -p "${OUTPUT_DIR}"
 
 OMP_NUM_THREADS=16 torchrun \
-  --nproc_per_node=auto \
+  --nproc_per_node="${NPROC_PER_NODE}" \
   --nnodes=1 \
   --node_rank=0 \
   JiT/eval/eval_sdxl_vae.py \

@@ -1,0 +1,75 @@
+# JiT Architecture Comparison
+
+This diagram is meant for presentation use: it shows the architectural delta between the older shared-trunk JiT and your newer dual-stream JiT in one view.
+
+- Before: `JiT-B/2-4C`
+- After: `JiT-Dual-B/2-4C-896`
+
+```mermaid
+flowchart LR
+  classDef before fill:#F7E7B7,stroke:#8A6D1D,color:#2F2410,stroke-width:1.5px;
+  classDef after fill:#D7ECFF,stroke:#1F5E99,color:#10263D,stroke-width:1.5px;
+  classDef change fill:#DDF5E3,stroke:#2E7D32,color:#16331A,stroke-width:1.5px;
+
+  subgraph BASE["Before: JiT-B/2-4C (single shared trunk)"]
+    direction TB
+    B_IN["Inputs<br/>latent + DINO"]:::before
+    B_EMB["Embed both modalities<br/>256 latent tokens + 256 DINO tokens"]:::before
+    B_CAT["Concat once<br/>[latent tokens | DINO tokens]"]:::before
+    B_PRE["Blocks 0-3<br/>one shared transformer stack"]:::before
+    B_CTX["Insert one shared in-context prefix<br/>at block 4"]:::before
+    B_POST["Blocks 4-11<br/>same weights jointly mix both modalities"]:::before
+    B_SPLIT["Split sequence back into<br/>latent branch + DINO branch"]:::before
+    B_HEADS["Separate output heads<br/>latent prediction + DINO prediction"]:::before
+
+    B_IN --> B_EMB --> B_CAT --> B_PRE --> B_CTX --> B_POST --> B_SPLIT --> B_HEADS
+  end
+
+  subgraph DIFFS["What Changed In Your Model"]
+    direction TB
+    C1["1. Shared mixed sequence -> two dedicated towers"]:::change
+    C2["2. Context added at block 4 -> per-stream context from block 0"]:::change
+    C3["3. Implicit interaction everywhere -> explicit bidirectional cross-fusion"]:::change
+    C4["4. One shared trunk -> separate latent/DINO weights through the network"]:::change
+  end
+
+  subgraph DUAL["After: JiT-Dual-B/2-4C-896 (your dual-stream model)"]
+    direction TB
+    D_IN["Inputs<br/>latent + DINO"]:::after
+    D_EMB["Embed each modality separately<br/>256 latent tokens + 256 DINO tokens"]:::after
+    D_CTX["Add per-stream context immediately<br/>latent context + DINO context at block 0"]:::after
+
+    D_L0["Latent tower blocks 0-3<br/>latent-only weights"]:::after
+    D_D0["DINO tower blocks 0-3<br/>DINO-only weights"]:::after
+
+    D_F4["Cross-fusion at block 4<br/>latent attends to DINO<br/>DINO attends to latent"]:::after
+
+    D_L1["Latent tower blocks 4-7"]:::after
+    D_D1["DINO tower blocks 4-7"]:::after
+
+    D_F8["Cross-fusion at block 8<br/>second bidirectional exchange"]:::after
+
+    D_L2["Latent tower blocks 8-11"]:::after
+    D_D2["DINO tower blocks 8-11"]:::after
+
+    D_HEADS["Separate output heads<br/>latent prediction + DINO prediction"]:::after
+
+    D_IN --> D_EMB --> D_CTX
+    D_CTX --> D_L0 --> D_F4 --> D_L1 --> D_F8 --> D_L2 --> D_HEADS
+    D_CTX --> D_D0 --> D_F4
+    D_F4 --> D_D1 --> D_F8 --> D_D2 --> D_HEADS
+  end
+```
+
+## Talk Track
+
+- Old JiT mixes latent and DINO tokens into one long sequence almost immediately, so the whole network shares one trunk.
+- Your dual-stream model keeps the latent and DINO paths separate for most of the network, which lets each modality specialize.
+- Instead of mixing everywhere, the new model exchanges information only at explicit cross-fusion points.
+- Context also moves earlier: the old model injects one shared prefix at block `4`, while the new model gives each stream its own context from block `0`.
+
+## How To Render
+
+1. Open this Markdown file in a Mermaid-capable preview.
+2. Render the raw Mermaid source with:
+   - `mmdc -i JiT/jit_architecture_comparison.mmd -o JiT/jit_architecture_comparison.svg`

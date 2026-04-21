@@ -19,9 +19,10 @@ module load cuda/12.6.1
 
 source /u/msalunkhe/.venv/bin/activate
 cd /u/msalunkhe/DiffusionFusion/DiT
+NPROC_PER_NODE="${NPROC_PER_NODE:-${SLURM_GPUS_ON_NODE:-2}}"
 
 # Use all GPUs on the node
-torchrun --nnodes=1 --nproc_per_node=auto \
+torchrun --nnodes=1 --nproc_per_node="${NPROC_PER_NODE}" \
   sample_ddp.py \
   --model DiT-XL/2 \
   --num-fid-samples 50000 \

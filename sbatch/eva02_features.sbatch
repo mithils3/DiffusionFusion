@@ -19,12 +19,13 @@ module load cuda/12.9.0
 source /u/msalunkhe/.venv/bin/activate
 cd /u/msalunkhe/DiffusionFusion/JiT
 git pull
+NPROC_PER_NODE="${NPROC_PER_NODE:-${SLURM_GPUS_ON_NODE:-2}}"
 
 IMAGENET_PATH="ILSVRC/imagenet-1k"
 OUTPUT_DIR="/work/hdd/bgnp/msalunkhe/data/imagenet"
 SPLIT="${SPLIT:-train}"
 
-torchrun --nproc_per_node=auto --nnodes=1 --node_rank=0 \
+torchrun --nproc_per_node="${NPROC_PER_NODE}" --nnodes=1 --node_rank=0 \
 feature_extraction/eva02.py \
 --data-path "${IMAGENET_PATH}" \
 --features-path "${OUTPUT_DIR}" \

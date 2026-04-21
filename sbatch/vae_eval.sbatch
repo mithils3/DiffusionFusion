@@ -19,6 +19,7 @@ module load cuda/12.9.0
 source /u/msalunkhe/.venv/bin/activate
 cd /u/msalunkhe/DiffusionFusion
 git pull
+NPROC_PER_NODE="${NPROC_PER_NODE:-${SLURM_GPUS_ON_NODE:-2}}"
 
 TRAIN_OUTPUT_DIR="${TRAIN_OUTPUT_DIR:-/work/nvme/bgnp/msalunkhe/outputs/jit_base_patch_size_2_cosine_80ep}"
 RESUME_DIR="${RESUME_DIR:-${TRAIN_OUTPUT_DIR}}"
@@ -44,7 +45,7 @@ if [[ "${KEEP_IMAGES:-0}" == "1" ]]; then
 fi
 
 OMP_NUM_THREADS=16 torchrun \
-  --nproc_per_node=auto \
+  --nproc_per_node="${NPROC_PER_NODE}" \
   --nnodes=1 \
   --node_rank=0 \
   JiT/eval/vae_eval.py \

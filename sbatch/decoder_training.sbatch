@@ -19,6 +19,7 @@ module load cuda/12.9.0
 source /u/msalunkhe/.venv/bin/activate
 cd /u/msalunkhe/DiffusionFusion/JiT
 git pull
+NPROC_PER_NODE="${NPROC_PER_NODE:-${SLURM_GPUS_ON_NODE:-4}}"
 
 IMAGE_DATA_PATH="ILSVRC/imagenet-1k"
 
@@ -70,7 +71,7 @@ if [[ -n "${DISC_FREEZE_BACKBONE}" ]]; then
 fi
 
 OMP_NUM_THREADS=16 torchrun \
-  --nproc_per_node=auto \
+  --nproc_per_node="${NPROC_PER_NODE}" \
   --nnodes=1 \
   --node_rank=0 \
   main_decoder.py \
