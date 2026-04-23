@@ -1,3 +1,4 @@
+import math
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -32,6 +33,22 @@ class _FinalStepPredictor(torch.nn.Module):
         return latent, dino
 
 
+class _ConstantDinoTimePredictor(torch.nn.Module):
+    supports_dino_time = True
+
+    def __init__(self, value: float):
+        super().__init__()
+        self.value = value
+        self.seen_t = None
+        self.seen_dino_t = None
+
+    def forward(self, z_latent, z_dino, t, labels, dino_t=None):
+        del labels
+        self.seen_t = t.detach().clone()
+        self.seen_dino_t = dino_t.detach().clone()
+        return torch.full_like(z_latent, self.value), torch.full_like(z_dino, self.value)
+
+
 class DenoiserSamplingTests(unittest.TestCase):
     def _build_args(self, **overrides):
         args = dict(
@@ -55,9 +72,70 @@ class DenoiserSamplingTests(unittest.TestCase):
             cfg=1.0,
             interval_min=0.0,
             interval_max=1.0,
+            dino_time_shift=0.0,
         )
         args.update(overrides)
         return SimpleNamespace(**args)
+
+    def test_dino_time_shift_is_logit_space_and_preserves_endpoints(self):
+        with patch.dict(
+            denoiser_module.JiT_models,
+            {"test-model": lambda **_kwargs: _ConstantPredictor(0.0)},
+            clear=False,
+        ):
+            model = denoiser_module.Denoiser(
+                self._build_args(dino_time_shift=math.log(3.0))
+            )
+
+        t = torch.tensor([0.0, 0.5, 1.0]).view(-1, 1, 1, 1)
+        dino_t = model.dino_time(t)
+
+        expected = torch.tensor([0.0, 0.75, 1.0]).view(-1, 1, 1, 1)
+        self.assertTrue(torch.allclose(dino_t, expected))
+
+    def test_forward_sample_passes_dino_time_to_dual_time_model(self):
+        predictor = _ConstantDinoTimePredictor(1.0)
+        with patch.dict(
+            denoiser_module.JiT_models,
+            {"test-model": lambda **_kwargs: predictor},
+            clear=False,
+        ):
+            model = denoiser_module.Denoiser(self._build_args())
+
+        z_latent = torch.zeros(1, 1, 1, 1)
+        z_dino = torch.zeros(1, 1, 1, 1)
+        t = torch.full((1, 1, 1, 1), 0.25)
+        dino_t = torch.full((1, 1, 1, 1), 0.5)
+        labels = torch.zeros(1, dtype=torch.long)
+
+        model._forward_sample_xpred(z_latent, z_dino, t, labels, dino_t)
+
+        self.assertTrue(torch.equal(predictor.seen_t, torch.tensor([0.25])))
+        self.assertTrue(torch.equal(predictor.seen_dino_t, torch.tensor([0.5])))
+
+    def test_euler_step_uses_separate_dino_time_delta(self):
+        with patch.dict(
+            denoiser_module.JiT_models,
+            {"test-model": lambda **_kwargs: _ConstantDinoTimePredictor(1.0)},
+            clear=False,
+        ):
+            model = denoiser_module.Denoiser(
+                self._build_args(sampling_method="euler")
+            )
+
+        z_latent = torch.zeros(1, 1, 1, 1)
+        z_dino = torch.zeros(1, 1, 1, 1)
+        t = torch.full((1, 1, 1, 1), 0.0)
+        t_next = torch.full((1, 1, 1, 1), 0.5)
+        dino_t = torch.full((1, 1, 1, 1), 0.0)
+        dino_t_next = torch.full((1, 1, 1, 1), 0.75)
+        labels = torch.zeros(1, dtype=torch.long)
+
+        latent_next, dino_next = model._euler_step(
+            z_latent, z_dino, t, t_next, labels, dino_t, dino_t_next)
+
+        self.assertTrue(torch.allclose(latent_next, torch.full_like(latent_next, 0.5)))
+        self.assertTrue(torch.allclose(dino_next, torch.full_like(dino_next, 0.75)))
 
     def test_forward_sample_uses_inference_t_eps_near_terminal_time(self):
         with patch.dict(

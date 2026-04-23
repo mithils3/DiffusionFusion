@@ -1,6 +1,6 @@
 #!/bin/bash
-#SBATCH -J JiT_cosine
-#SBATCH -A bgnp-dtai-gh
+#SBATCH -J JiT_80ep
+#SBATCH -A betw-dtai-gh
 #SBATCH -p ghx4
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -63,14 +63,14 @@ echo "===== End preflight ====="
 
 
 IMAGENET_PATH="/work/hdd/bgnp/msalunkhe/data/imagenet/"
-OUTPUT_DIR="/work/nvme/bgnp/msalunkhe/outputs/jit_base_patch_size_2_cosine_180ep"
-WANDB_RUN_NAME="${WANDB_RUN_NAME:-jit_base_patch_size_2_cosine_180ep}"
+OUTPUT_DIR="/work/nvme/bgnp/msalunkhe/outputs/jit_dual_patch_size_2_constant_80ep"
+WANDB_RUN_NAME="${WANDB_RUN_NAME:-jit_dual_patch_size_2_constant_80ep}"
 FID_STATS_PATH="${FID_STATS_PATH:-/u/msalunkhe/DiffusionFusion/JiT/fid_stats/jit_in256_stats.npz}"
 NUM_IMAGES="${NUM_IMAGES:-10000}"
 EVAL_FREQ="${EVAL_FREQ:-20}"
-EPOCHS="${EPOCHS:-180}"
-LR_SCHEDULE="${LR_SCHEDULE:-cosine}"
-MIN_LR="${MIN_LR:-1e-5}"
+EPOCHS="${EPOCHS:-80}"
+LR_SCHEDULE="${LR_SCHEDULE:-constant}"
+DINO_TIME_SHIFT="${DINO_TIME_SHIFT:-0.0}"
 BATCH_SIZE="${BATCH_SIZE:-128}"
 ACCUM_ITER="${ACCUM_ITER:-2}"
 mkdir -p "${OUTPUT_DIR}"
@@ -84,14 +84,14 @@ main_jit.py \
 --P_mean -0.8 \
 --P_std 0.8 \
 --noise_scale 1.0 \
+--dino_time_shift "${DINO_TIME_SHIFT}" \
 --batch_size "${BATCH_SIZE}" \
 --accum_iter "${ACCUM_ITER}" \
 --blr 5e-5 \
 --epochs "${EPOCHS}" \
 --warmup_epochs 5 \
 --lr_schedule "${LR_SCHEDULE}" \
---min_lr "${MIN_LR}" \
-    --gen_bsz 128 \
+--gen_bsz 128 \
 --num_images "${NUM_IMAGES}" \
 --cfg 2.9 \
 --interval_min 0.1 \

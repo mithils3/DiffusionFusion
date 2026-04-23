@@ -20,6 +20,7 @@ class JiTDualStreamTests(unittest.TestCase):
 
         self.assertEqual(model.in_context_start, 0)
         self.assertEqual(model.cross_fusion_layers, (4, 8))
+        self.assertTrue(model.supports_dino_time)
         self.assertEqual(model.latent_in_context_posemb.shape, (1, 4, 896))
         self.assertEqual(model.dino_in_context_posemb.shape, (1, 4, 896))
 
@@ -41,9 +42,10 @@ class JiTDualStreamTests(unittest.TestCase):
         dino = torch.randn(1, 768, 4, 4)
         t = torch.tensor([1.0])
         y = torch.tensor([5], dtype=torch.long)
+        dino_t = torch.tensor([0.25])
 
         with torch.no_grad():
-            latent_out, dino_out = model(latent, dino, t, y)
+            latent_out, dino_out = model(latent, dino, t, y, dino_t=dino_t)
 
         self.assertEqual(latent_out.shape, latent.shape)
         self.assertEqual(dino_out.shape, dino.shape)

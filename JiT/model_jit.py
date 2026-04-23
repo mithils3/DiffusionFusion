@@ -14,10 +14,41 @@ def modulate(x, shift, scale):
     return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
 
 
-class BottleneckPatchEmbed(nn.Module):
-    """ Image to Patch Embedding
-    """
+def layer_drop(value, depth, index):
+    return value if depth // 4 <= index < depth // 4 * 3 else 0.0
 
+
+def init_linear(module):
+    if isinstance(module, nn.Linear):
+        torch.nn.init.xavier_uniform_(module.weight)
+        if module.bias is not None:
+            nn.init.constant_(module.bias, 0)
+
+
+def init_patch_embed(embedder):
+    for projection in (embedder.proj1, embedder.proj2):
+        nn.init.xavier_uniform_(projection.weight.data.view([projection.weight.shape[0], -1]))
+    nn.init.constant_(embedder.proj2.bias, 0)
+
+
+def init_optional_linear(module):
+    if isinstance(module, nn.Linear):
+        nn.init.xavier_uniform_(module.weight.data.view([module.weight.shape[0], -1]))
+        nn.init.constant_(module.bias, 0)
+
+
+def zero_adaln(module):
+    nn.init.constant_(module.adaLN_modulation[-1].weight, 0)
+    nn.init.constant_(module.adaLN_modulation[-1].bias, 0)
+
+
+def zero_final_layer(layer):
+    zero_adaln(layer)
+    nn.init.constant_(layer.linear.weight, 0)
+    nn.init.constant_(layer.linear.bias, 0)
+
+
+class BottleneckPatchEmbed(nn.Module):
     def __init__(self, img_size=224, patch_size=16, in_chans=3, pca_dim=768, embed_dim=768, bias=True):
         super().__init__()
         img_size = (img_size, img_size)
@@ -97,19 +128,6 @@ class LabelEmbedder(nn.Module):
     def forward(self, labels):
         embeddings = self.embedding_table(labels)
         return embeddings
-
-
-def scaled_dot_product_attention(query, key, value, dropout_p=0.0) -> torch.Tensor:
-    L, S = query.size(-2), key.size(-2)
-    scale_factor = 1 / math.sqrt(query.size(-1))
-    attn_bias = torch.zeros(query.size(0), 1, L, S, dtype=query.dtype).cuda()
-
-    with torch.cuda.amp.autocast(enabled=False):
-        attn_weight = query.float() @ key.float().transpose(-2, -1) * scale_factor
-    attn_weight += attn_bias
-    attn_weight = torch.softmax(attn_weight, dim=-1)
-    attn_weight = torch.dropout(attn_weight, dropout_p, train=True)
-    return attn_weight @ value
 
 
 class Attention(nn.Module):
@@ -318,7 +336,7 @@ class DinoFinalLayer(nn.Module):
     The final layer of JiT.
     """
 
-    def __init__(self, hidden_size, dino_hidden_size, out_channels):
+    def __init__(self, hidden_size, dino_hidden_size):
         super().__init__()
         self.norm_final = RMSNorm(hidden_size)
         self.linear = nn.Linear(
@@ -436,7 +454,9 @@ class CrossFusionBlock(nn.Module):
             hidden_size, num_heads, attn_drop=attn_drop, proj_drop=proj_drop
         )
 
-    def forward(self, latent, dino, c, feat_rope=None, latent_num_patches=0, dino_num_patches=0):
+    def forward(self, latent, dino, c, feat_rope=None, latent_num_patches=0, dino_num_patches=0, dino_c=None):
+        if dino_c is None:
+            dino_c = c
         latent_snapshot = latent
         dino_snapshot = dino
         latent = self.latent_from_dino(
@@ -450,7 +470,7 @@ class CrossFusionBlock(nn.Module):
         dino = self.dino_from_latent(
             dino_snapshot,
             latent_snapshot,
-            c,
+            dino_c,
             feat_rope=feat_rope,
             num_patches=dino_num_patches,
             context_num_patches=latent_num_patches,
@@ -502,6 +522,7 @@ class JiT(nn.Module):
         self.num_classes = num_classes
         self.dino_hidden_size = dino_hidden_size
         self.dino_patches = dino_patches
+        self.supports_dino_time = False
 
         # time and class embed
         self.t_embedder = TimestepEmbedder(hidden_size)
@@ -535,9 +556,8 @@ class JiT(nn.Module):
         # transformer
         self.blocks = nn.ModuleList([
             JiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio,
-                     attn_drop=attn_drop if (
-                         depth // 4 * 3 > i >= depth // 4) else 0.0,
-                     proj_drop=proj_drop if (depth // 4 * 3 > i >= depth // 4) else 0.0)
+                     attn_drop=layer_drop(attn_drop, depth, i),
+                     proj_drop=layer_drop(proj_drop, depth, i))
             for i in range(depth)
         ])
 
@@ -545,17 +565,11 @@ class JiT(nn.Module):
         self.latent_final_layer = FinalLayer(
             hidden_size, patch_size, self.out_channels)
         self.dino_final_layer = DinoFinalLayer(
-            hidden_size, dino_hidden_size, self.out_channels)
+            hidden_size, dino_hidden_size)
         self.initialize_weights()
 
     def initialize_weights(self):
-        # Initialize transformer layers:
-        def _basic_init(module):
-            if isinstance(module, nn.Linear):
-                torch.nn.init.xavier_uniform_(module.weight)
-                if module.bias is not None:
-                    nn.init.constant_(module.bias, 0)
-        self.apply(_basic_init)
+        self.apply(init_linear)
 
         # Initialize (and freeze) pos_embed by sin-cos embedding:
         pos_embed = get_2d_sincos_pos_embed(
@@ -563,16 +577,8 @@ class JiT(nn.Module):
         self.pos_embed.data.copy_(
             torch.from_numpy(pos_embed).float().unsqueeze(0))
 
-        # Initialize patch_embed like nn.Linear (instead of nn.Conv2d):
-        w1 = self.x_embedder.proj1.weight.data
-        nn.init.xavier_uniform_(w1.view([w1.shape[0], -1]))
-        w2 = self.x_embedder.proj2.weight.data
-        nn.init.xavier_uniform_(w2.view([w2.shape[0], -1]))
-        nn.init.constant_(self.x_embedder.proj2.bias, 0)
-        if isinstance(self.dino_embedder, nn.Linear):
-            wd = self.dino_embedder.weight.data
-            nn.init.xavier_uniform_(wd.view([wd.shape[0], -1]))
-            nn.init.constant_(self.dino_embedder.bias, 0)
+        init_patch_embed(self.x_embedder)
+        init_optional_linear(self.dino_embedder)
 
         # Initialize label embedding table:
         nn.init.normal_(self.y_embedder.embedding_table.weight, std=0.02)
@@ -582,20 +588,11 @@ class JiT(nn.Module):
 
         # Zero-out adaLN modulation layers:
         for block in self.blocks:
-            nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
-            nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
+            zero_adaln(block)
 
         # Zero-out output layers:
-        nn.init.constant_(
-            self.latent_final_layer.adaLN_modulation[-1].weight, 0)
-        nn.init.constant_(self.latent_final_layer.adaLN_modulation[-1].bias, 0)
-
-        nn.init.constant_(self.latent_final_layer.linear.weight, 0)
-        nn.init.constant_(self.latent_final_layer.linear.bias, 0)
-        nn.init.constant_(self.dino_final_layer.linear.weight, 0)
-        nn.init.constant_(self.dino_final_layer.linear.bias, 0)
-        nn.init.constant_(self.dino_final_layer.adaLN_modulation[-1].weight, 0)
-        nn.init.constant_(self.dino_final_layer.adaLN_modulation[-1].bias, 0)
+        zero_final_layer(self.latent_final_layer)
+        zero_final_layer(self.dino_final_layer)
 
     def unpatchify(self, x, p):
         """
@@ -611,12 +608,13 @@ class JiT(nn.Module):
         imgs = x.reshape(shape=(x.shape[0], c, h * p, h * p))
         return imgs
 
-    def forward(self, latent, dino_features, t, y):
+    def forward(self, latent, dino_features, t, y, dino_t=None):
         """
         x: (N, C, H, W)
         t: (N,)
         y: (N,)
         """
+        del dino_t
         # class and time embeddings
         t_emb = self.t_embedder(t)
         y_emb = self.y_embedder(y)
@@ -714,6 +712,7 @@ class JiTDualStream(nn.Module):
         self.dino_patches = dino_patches
         self.cross_every = cross_every
         self.cross_start = cross_start
+        self.supports_dino_time = True
 
         self.t_embedder = TimestepEmbedder(hidden_size)
         self.y_embedder = LabelEmbedder(num_classes, hidden_size)
@@ -753,8 +752,8 @@ class JiTDualStream(nn.Module):
                 hidden_size,
                 num_heads,
                 mlp_ratio=mlp_ratio,
-                attn_drop=attn_drop if (depth // 4 * 3 > i >= depth // 4) else 0.0,
-                proj_drop=proj_drop if (depth // 4 * 3 > i >= depth // 4) else 0.0,
+                attn_drop=layer_drop(attn_drop, depth, i),
+                proj_drop=layer_drop(proj_drop, depth, i),
             )
             for i in range(depth)
         ])
@@ -763,8 +762,8 @@ class JiTDualStream(nn.Module):
                 hidden_size,
                 num_heads,
                 mlp_ratio=mlp_ratio,
-                attn_drop=attn_drop if (depth // 4 * 3 > i >= depth // 4) else 0.0,
-                proj_drop=proj_drop if (depth // 4 * 3 > i >= depth // 4) else 0.0,
+                attn_drop=layer_drop(attn_drop, depth, i),
+                proj_drop=layer_drop(proj_drop, depth, i),
             )
             for i in range(depth)
         ])
@@ -776,62 +775,40 @@ class JiTDualStream(nn.Module):
             str(i): CrossFusionBlock(
                 hidden_size,
                 num_heads,
-                attn_drop=attn_drop if (depth // 4 * 3 > i >= depth // 4) else 0.0,
-                proj_drop=proj_drop if (depth // 4 * 3 > i >= depth // 4) else 0.0,
+                attn_drop=layer_drop(attn_drop, depth, i),
+                proj_drop=layer_drop(proj_drop, depth, i),
             )
             for i in self.cross_fusion_layers
         })
 
         self.latent_final_layer = FinalLayer(hidden_size, patch_size, self.out_channels)
-        self.dino_final_layer = DinoFinalLayer(hidden_size, dino_hidden_size, self.out_channels)
+        self.dino_final_layer = DinoFinalLayer(hidden_size, dino_hidden_size)
         self.initialize_weights()
 
     def initialize_weights(self):
-        def _basic_init(module):
-            if isinstance(module, nn.Linear):
-                torch.nn.init.xavier_uniform_(module.weight)
-                if module.bias is not None:
-                    nn.init.constant_(module.bias, 0)
-
-        self.apply(_basic_init)
+        self.apply(init_linear)
 
         pos_embed = get_2d_sincos_pos_embed(
             self.pos_embed.shape[-1], int(self.x_embedder.num_patches ** 0.5)
         )
         self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
 
-        w1 = self.x_embedder.proj1.weight.data
-        nn.init.xavier_uniform_(w1.view([w1.shape[0], -1]))
-        w2 = self.x_embedder.proj2.weight.data
-        nn.init.xavier_uniform_(w2.view([w2.shape[0], -1]))
-        nn.init.constant_(self.x_embedder.proj2.bias, 0)
-        if isinstance(self.dino_embedder, nn.Linear):
-            wd = self.dino_embedder.weight.data
-            nn.init.xavier_uniform_(wd.view([wd.shape[0], -1]))
-            nn.init.constant_(self.dino_embedder.bias, 0)
+        init_patch_embed(self.x_embedder)
+        init_optional_linear(self.dino_embedder)
 
         nn.init.normal_(self.y_embedder.embedding_table.weight, std=0.02)
         nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
         nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
 
         for block in list(self.latent_blocks) + list(self.dino_blocks):
-            nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
-            nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
+            zero_adaln(block)
 
         for block in self.cross_fusion_blocks.values():
-            nn.init.constant_(block.latent_from_dino.adaLN_modulation[-1].weight, 0)
-            nn.init.constant_(block.latent_from_dino.adaLN_modulation[-1].bias, 0)
-            nn.init.constant_(block.dino_from_latent.adaLN_modulation[-1].weight, 0)
-            nn.init.constant_(block.dino_from_latent.adaLN_modulation[-1].bias, 0)
+            zero_adaln(block.latent_from_dino)
+            zero_adaln(block.dino_from_latent)
 
-        nn.init.constant_(self.latent_final_layer.adaLN_modulation[-1].weight, 0)
-        nn.init.constant_(self.latent_final_layer.adaLN_modulation[-1].bias, 0)
-        nn.init.constant_(self.latent_final_layer.linear.weight, 0)
-        nn.init.constant_(self.latent_final_layer.linear.bias, 0)
-        nn.init.constant_(self.dino_final_layer.linear.weight, 0)
-        nn.init.constant_(self.dino_final_layer.linear.bias, 0)
-        nn.init.constant_(self.dino_final_layer.adaLN_modulation[-1].weight, 0)
-        nn.init.constant_(self.dino_final_layer.adaLN_modulation[-1].bias, 0)
+        zero_final_layer(self.latent_final_layer)
+        zero_final_layer(self.dino_final_layer)
 
     def unpatchify(self, x, p):
         c = self.out_channels
@@ -849,10 +826,14 @@ class JiTDualStream(nn.Module):
         dino_context = base_tokens + self.dino_in_context_posemb
         return latent_context, dino_context
 
-    def forward(self, latent, dino_features, t, y):
+    def forward(self, latent, dino_features, t, y, dino_t=None):
+        if dino_t is None:
+            dino_t = t
         t_emb = self.t_embedder(t)
+        dino_t_emb = self.t_embedder(dino_t)
         y_emb = self.y_embedder(y)
         c = t_emb + y_emb
+        dino_c = dino_t_emb + y_emb
 
         latent_tokens = self.x_embedder(latent)
         dino_tokens = dino_features.flatten(2).transpose(1, 2)
@@ -881,7 +862,7 @@ class JiTDualStream(nn.Module):
                 context_inserted = True
 
             latent_tokens = latent_block(latent_tokens, c, self.feat_rope, num_patches=num_patches)
-            dino_tokens = dino_block(dino_tokens, c, self.feat_rope, num_patches=num_patches)
+            dino_tokens = dino_block(dino_tokens, dino_c, self.feat_rope, num_patches=num_patches)
 
             fusion_key = str(i)
             if fusion_key in self.cross_fusion_blocks:
@@ -893,6 +874,7 @@ class JiTDualStream(nn.Module):
                     feat_rope=self.feat_rope,
                     latent_num_patches=num_patches,
                     dino_num_patches=num_patches,
+                    dino_c=dino_c,
                 )
 
         prefix_len = self.in_context_len if context_inserted else 0
@@ -900,7 +882,7 @@ class JiTDualStream(nn.Module):
         dino_tokens = dino_tokens[:, prefix_len:]
 
         latent_tokens = self.latent_final_layer(latent_tokens, c)
-        dino_tokens = self.dino_final_layer(dino_tokens, c)
+        dino_tokens = self.dino_final_layer(dino_tokens, dino_c)
         output = self.unpatchify(latent_tokens, self.patch_size)
         dino_tokens = dino_tokens.transpose(1, 2).view(
             -1, self.dino_hidden_size, self.dino_patches, self.dino_patches
@@ -993,12 +975,3 @@ JiT_models = {
     'JiT-L/2-4C': JiT_L_2_4C,
     'JiT-L/4-4C': JiT_L_4_4C,
 }
-if __name__ == "__main__":
-    module = JiT_B_2_4C().cuda()
-    latent = torch.randn(1, 4, 32, 32).cuda()
-    dino = torch.randn(1, 768, 16, 16).cuda()
-    t = torch.tensor([10]).cuda()
-    y = torch.tensor([5]).cuda()
-    with torch.no_grad():
-        output, dino_out = module(latent, dino, t, y)
-        print(output.shape, dino_out.shape)

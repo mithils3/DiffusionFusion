@@ -36,6 +36,7 @@ class Denoiser(nn.Module):
         self.noise_scale: float = args.noise_scale
         self.latent_loss_weight: float = getattr(args, "latent_loss_weight", 1.0)
         self.dino_loss_weight: float = getattr(args, "dino_loss_weight", 1.0)
+        self.dino_time_shift: float = float(getattr(args, "dino_time_shift", 0.0))
 
         # ema
         self.ema_decay1: float = args.ema_decay1
@@ -61,26 +62,55 @@ class Denoiser(nn.Module):
         z = torch.randn(n, device=device) * self.P_std + self.P_mean
         return torch.sigmoid(z)
 
+    def dino_time(self, t: torch.Tensor) -> torch.Tensor:
+        if self.dino_time_shift == 0.0:
+            return t
+
+        eps = torch.finfo(t.dtype).eps
+        shifted = torch.sigmoid(torch.logit(t.clamp(eps, 1.0 - eps)) + self.dino_time_shift)
+        shifted = torch.where(t <= 0.0, torch.zeros_like(shifted), shifted)
+        shifted = torch.where(t >= 1.0, torch.ones_like(shifted), shifted)
+        return shifted
+
     @staticmethod
     def _batch_time(value: float, batch_size: int, device: torch.device, ref: torch.Tensor) -> torch.Tensor:
         return torch.full((batch_size,), value, device=device).view(-1, *([1] * (ref.ndim - 1)))
+
+    def _net_forward(
+        self,
+        z_latent: torch.Tensor,
+        z_dino: torch.Tensor,
+        t: torch.Tensor,
+        labels: torch.Tensor,
+        dino_t: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if getattr(self.net, "supports_dino_time", False):
+            return self.net(
+                z_latent,
+                z_dino,
+                t.flatten(),
+                labels,
+                dino_t.flatten() if dino_t is not None else None,
+            )
+        return self.net(z_latent, z_dino, t.flatten(), labels)
 
     def forward(self, latent: torch.Tensor, dino: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
         labels_dropped = self.drop_labels(labels) if self.training else labels
         t = self.sample_t(latent.size(
             0), device=latent.device).view(-1, *([1] * (latent.ndim - 1)))
+        dino_t = self.dino_time(t)
         e_latent = torch.randn_like(latent) * self.noise_scale
         e_dino = torch.randn_like(dino) * self.noise_scale
         z_latent = t * latent + (1 - t) * e_latent
-        z_dino = t * dino + (1 - t) * e_dino
+        z_dino = dino_t * dino + (1 - dino_t) * e_dino
         v_latent = (latent - z_latent) / (1 - t).clamp_min(self.t_eps)
-        v_dino = (dino - z_dino) / (1 - t).clamp_min(self.t_eps)
+        v_dino = (dino - z_dino) / (1 - dino_t).clamp_min(self.t_eps)
 
-        latent_pred, dino_pred = self.net(
-            z_latent, z_dino, t.flatten(), labels_dropped)
+        latent_pred, dino_pred = self._net_forward(
+            z_latent, z_dino, t, labels_dropped, dino_t)
         v_latent_pred = (latent_pred - z_latent) / \
             (1 - t).clamp_min(self.t_eps)
-        v_dino_pred = (dino_pred - z_dino) / (1 - t).clamp_min(self.t_eps)
+        v_dino_pred = (dino_pred - z_dino) / (1 - dino_t).clamp_min(self.t_eps)
 
         # L2 loss on v targets while keeping the network output in x-space.
         loss_latent = ((v_latent - v_latent_pred) ** 2).mean()
@@ -116,7 +146,10 @@ class Denoiser(nn.Module):
         for i in range(self.steps - 1):
             t = self._batch_time(float(timesteps[i]), bsz, device, z_latent)
             t_next = self._batch_time(float(timesteps[i + 1]), bsz, device, z_latent)
-            z_latent, z_dino = stepper(z_latent, z_dino, t, t_next, labels)
+            dino_t = self.dino_time(t)
+            dino_t_next = self.dino_time(t_next)
+            z_latent, z_dino = stepper(
+                z_latent, z_dino, t, t_next, labels, dino_t, dino_t_next)
         # Land on the model's guided x-prediction directly so the final step
         # is not shortened by the training-time velocity clamp near t=1.
         z_latent, z_dino = self._forward_sample_xpred(
@@ -140,13 +173,21 @@ class Denoiser(nn.Module):
         z_dino: torch.Tensor,
         t: torch.Tensor,
         labels: torch.Tensor,
+        dino_t: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if dino_t is None:
+            dino_t = self.dino_time(t)
         # conditional
-        latent_cond, dino_cond = self.net(z_latent, z_dino, t.flatten(), labels)
+        latent_cond, dino_cond = self._net_forward(z_latent, z_dino, t, labels, dino_t)
 
         # unconditional
-        latent_uncond, dino_uncond = self.net(
-            z_latent, z_dino, t.flatten(), torch.full_like(labels, self.num_classes))
+        latent_uncond, dino_uncond = self._net_forward(
+            z_latent,
+            z_dino,
+            t,
+            torch.full_like(labels, self.num_classes),
+            dino_t,
+        )
         cfg_scale_interval = self._cfg_scale_interval(t)
         latent_pred = latent_uncond + cfg_scale_interval * \
             (latent_cond - latent_uncond)
@@ -161,11 +202,14 @@ class Denoiser(nn.Module):
         z_dino: torch.Tensor,
         t: torch.Tensor,
         labels: torch.Tensor,
+        dino_t: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if dino_t is None:
+            dino_t = self.dino_time(t)
         latent_pred, dino_pred = self._forward_sample_xpred(
-            z_latent, z_dino, t, labels)
+            z_latent, z_dino, t, labels, dino_t)
         denom_lat = (1.0 - t).clamp_min(self.inference_t_eps)
-        denom_dino = (1.0 - t).clamp_min(self.inference_t_eps)
+        denom_dino = (1.0 - dino_t).clamp_min(self.inference_t_eps)
         v_latent = (latent_pred - z_latent) / denom_lat
         v_dino = (dino_pred - z_dino) / denom_dino
         return v_latent, v_dino
@@ -178,10 +222,16 @@ class Denoiser(nn.Module):
         t: torch.Tensor,
         t_next: torch.Tensor,
         labels: torch.Tensor,
+        dino_t: torch.Tensor | None = None,
+        dino_t_next: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        v_latent, v_dino = self._forward_sample(z_latent, z_dino, t, labels)
+        if dino_t is None:
+            dino_t = self.dino_time(t)
+        if dino_t_next is None:
+            dino_t_next = self.dino_time(t_next)
+        v_latent, v_dino = self._forward_sample(z_latent, z_dino, t, labels, dino_t)
         z_latent_next = z_latent + (t_next - t) * v_latent
-        z_dino_next = z_dino + (t_next - t) * v_dino
+        z_dino_next = z_dino + (dino_t_next - dino_t) * v_dino
         return z_latent_next, z_dino_next
 
     @torch.no_grad()
@@ -192,22 +242,30 @@ class Denoiser(nn.Module):
         t: torch.Tensor,
         t_next: torch.Tensor,
         labels: torch.Tensor,
+        dino_t: torch.Tensor | None = None,
+        dino_t_next: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        v_latent_t, v_dino_t = self._forward_sample(z_latent, z_dino, t, labels)
+        if dino_t is None:
+            dino_t = self.dino_time(t)
+        if dino_t_next is None:
+            dino_t_next = self.dino_time(t_next)
+        v_latent_t, v_dino_t = self._forward_sample(
+            z_latent, z_dino, t, labels, dino_t)
 
         z_latent_euler = z_latent + (t_next - t) * v_latent_t
-        z_dino_euler = z_dino + (t_next - t) * v_dino_t
+        z_dino_euler = z_dino + (dino_t_next - dino_t) * v_dino_t
         v_latent_next, v_dino_next = self._forward_sample(
             z_latent_euler,
             z_dino_euler,
             t_next,
             labels,
+            dino_t_next,
         )
 
         v_latent = 0.5 * (v_latent_t + v_latent_next)
         v_dino = 0.5 * (v_dino_t + v_dino_next)
         z_latent_next = z_latent + (t_next - t) * v_latent
-        z_dino_next = z_dino + (t_next - t) * v_dino
+        z_dino_next = z_dino + (dino_t_next - dino_t) * v_dino
         return z_latent_next, z_dino_next
 
     @torch.no_grad()

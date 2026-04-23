@@ -7,8 +7,11 @@ from pathlib import Path
 
 import torch
 import torch.backends.cudnn as cudnn
-from torch.utils.tensorboard import SummaryWriter
-import wandb
+
+try:
+    from torch.utils.tensorboard import SummaryWriter
+except ImportError:
+    SummaryWriter = None
 
 import JiT.util.misc as misc
 from JiT.util.dataset import (
@@ -19,6 +22,11 @@ import copy
 from JiT.engine_jit import train_one_epoch, evaluate
 from JiT.denoiser import Denoiser
 from JiT.eval.diffusion_decoder import load_decoder_for_eval
+
+try:
+    import wandb
+except ImportError:
+    wandb = None
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -34,6 +42,12 @@ def resolve_default_fid_stats_path(latent_size: int) -> str | None:
     if candidate.is_file():
         return str(candidate)
     return None
+
+
+def add_bool_arg(parser, name, default, help=None):
+    parser.add_argument(f"--{name}", action="store_true", help=help)
+    parser.add_argument(f"--no_{name}", action="store_false", dest=name)
+    parser.set_defaults(**{name: default})
 
 
 def get_args_parser():
@@ -86,6 +100,8 @@ def get_args_parser():
     parser.add_argument('--t_eps', default=5e-2, type=float)
     parser.add_argument('--inference_t_eps', default=1e-5, type=float,
                         help='Clamp floor used only during inference velocity conversion')
+    parser.add_argument('--dino_time_shift', default=0.0, type=float,
+                        help='Logit-space shift applied to the DINO denoising time schedule')
     parser.add_argument('--label_drop_prob', default=0.1, type=float)
     parser.add_argument('--latent_loss_weight', default=1.0, type=float,
                         help='Weight applied to the latent denoising loss')
@@ -95,31 +111,28 @@ def get_args_parser():
     parser.add_argument('--seed', default=0, type=int)
     parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
                         help='Starting epoch')
-    parser.add_argument('--pin_mem', action='store_true',
-                        help='Pin CPU memory in DataLoader for faster GPU transfers')
-    parser.add_argument('--no_pin_mem', action='store_false', dest='pin_mem')
-    parser.set_defaults(pin_mem=True)
-    parser.add_argument('--ram_shard_prefetch', action='store_true',
-                        help='While one RAM-loaded shard is training, preload the next shard in a background thread')
-    parser.add_argument('--no_ram_shard_prefetch', action='store_false', dest='ram_shard_prefetch')
-    parser.set_defaults(ram_shard_prefetch=True)
+    add_bool_arg(
+        parser, 'pin_mem', True,
+        help='Pin CPU memory in DataLoader for faster GPU transfers',
+    )
+    add_bool_arg(
+        parser, 'ram_shard_prefetch', True,
+        help='While one RAM-loaded shard is training, preload the next shard in a background thread',
+    )
     parser.add_argument('--ddp_bucket_cap_mb', default=100, type=int,
                         help='DDP gradient bucket size in MB')
-    parser.add_argument('--ddp_broadcast_buffers', action='store_true',
-                        help='Broadcast model buffers from rank 0 each forward')
-    parser.add_argument('--no_ddp_broadcast_buffers',
-                        action='store_false', dest='ddp_broadcast_buffers')
-    parser.set_defaults(ddp_broadcast_buffers=False)
-    parser.add_argument('--ddp_gradient_as_bucket_view', action='store_true',
-                        help='Use DDP bucket views to reduce gradient memory copies')
-    parser.add_argument('--no_ddp_gradient_as_bucket_view',
-                        action='store_false', dest='ddp_gradient_as_bucket_view')
-    parser.set_defaults(ddp_gradient_as_bucket_view=True)
-    parser.add_argument('--ddp_static_graph', action='store_true',
-                        help='Enable DDP static graph optimizations')
-    parser.add_argument('--no_ddp_static_graph',
-                        action='store_false', dest='ddp_static_graph')
-    parser.set_defaults(ddp_static_graph=True)
+    add_bool_arg(
+        parser, 'ddp_broadcast_buffers', False,
+        help='Broadcast model buffers from rank 0 each forward',
+    )
+    add_bool_arg(
+        parser, 'ddp_gradient_as_bucket_view', True,
+        help='Use DDP bucket views to reduce gradient memory copies',
+    )
+    add_bool_arg(
+        parser, 'ddp_static_graph', True,
+        help='Enable DDP static graph optimizations',
+    )
 
     # sampling
     parser.add_argument('--sampling_method', default='heun', type=str,
@@ -164,11 +177,7 @@ def get_args_parser():
     parser.add_argument('--save_last_freq', type=int, default=5,
                         help='Frequency (in epochs) to save checkpoints')
     parser.add_argument('--log_freq', default=5, type=int)
-    parser.add_argument('--use_wandb', action='store_true',
-                        help='Enable Weights & Biases logging')
-    parser.add_argument('--no_use_wandb', action='store_false', dest='use_wandb',
-                        help='Disable Weights & Biases logging')
-    parser.set_defaults(use_wandb=True)
+    add_bool_arg(parser, 'use_wandb', True, help='Enable Weights & Biases logging')
     parser.add_argument('--wandb_project', type=str, default='jit',
                         help='Weights & Biases project name')
     parser.add_argument('--wandb_entity', type=str, default=None,
@@ -195,6 +204,133 @@ def get_args_parser():
 
     return parser
 
+
+def init_loggers(args, global_rank):
+    log_writer = None
+    if global_rank == 0 and args.output_dir:
+        os.makedirs(args.output_dir, exist_ok=True)
+        if SummaryWriter is not None:
+            log_writer = SummaryWriter(log_dir=args.output_dir)
+
+    wandb_run = None
+    if global_rank == 0 and args.use_wandb:
+        if wandb is None:
+            raise ImportError(
+                "wandb is not installed. Install it with `pip install wandb` or disable --use_wandb."
+            )
+        wandb_run = wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            name=args.wandb_run_name,
+            config=vars(args),
+            dir=args.output_dir or None,
+            mode=args.wandb_mode,
+        )
+        misc.configure_wandb_step_metrics(wandb_run)
+    return log_writer, wandb_run
+
+
+def build_train_loader(args, latent_store, dino_store, num_tasks, global_rank):
+    dataset = RamLoadedShardDataset(
+        latent_store=latent_store,
+        dino_store=dino_store,
+        batch_size=args.batch_size,
+        num_replicas=num_tasks,
+        rank=global_rank,
+        shuffle_shards=True,
+        seed=args.seed,
+        preload_next_shard=args.ram_shard_prefetch,
+    )
+    loader = torch.utils.data.DataLoader(
+        dataset=dataset,
+        batch_size=None,
+        num_workers=0,
+        pin_memory=args.pin_mem,
+    )
+    return dataset, loader
+
+
+def describe_dataset_plan(dataset, latent_store, dino_store, args):
+    plan = dataset.describe_current_plan()
+    max_shard_samples = max(span.size for span in dataset.logical_shards)
+    approx_max_ram_bytes = max_shard_samples * (
+        latent_store.bytes_per_sample + dino_store.bytes_per_sample
+    )
+    print(
+        "RAM shard loading enabled using "
+        f"{plan['logical_shard_count']} logical shards from {plan['logical_shard_source']}."
+    )
+    print(
+        "Approx max per-rank shard working set: "
+        f"{approx_max_ram_bytes / (1024 ** 3):.2f} GiB."
+    )
+    if args.ram_shard_prefetch:
+        print(
+            "RAM shard prefetch enabled: peak per-rank working set can temporarily reach about "
+            f"{approx_max_ram_bytes * 2 / (1024 ** 3):.2f} GiB while the next shard is staged."
+        )
+    print(
+        "Epoch 0 steps per rank: "
+        f"{plan['num_batches']} "
+        f"(samples/rank={plan['num_samples_per_rank']}, "
+        f"dropped_tail_per_rank={plan['dropped_samples_per_rank']})."
+    )
+    print(
+        "Gradient accumulation: "
+        f"{args.accum_iter} micro-batches/update "
+        f"-> {math.ceil(plan['num_batches'] / args.accum_iter)} optimizer updates per rank in epoch 0."
+    )
+
+
+def load_eval_decoder(args, device, global_rank):
+    if not (args.online_eval or args.evaluate_gen):
+        return None
+
+    fid_stats_path = args.fid_stats_path or resolve_default_fid_stats_path(args.latent_size)
+    if fid_stats_path is None:
+        raise FileNotFoundError(
+            "Evaluation requires --fid_stats_path, and no built-in FID stats file was found "
+            f"for latent_size={args.latent_size} under {_FID_STATS_DIR}."
+        )
+    args.fid_stats_path = str(Path(fid_stats_path).expanduser().resolve())
+    if not os.path.isfile(args.fid_stats_path):
+        raise FileNotFoundError(f"FID statistics file not found: {args.fid_stats_path}")
+    if not args.decoder_checkpoint:
+        raise ValueError("Evaluation requires --decoder_checkpoint pointing to a trained decoder.")
+
+    decoder = load_decoder_for_eval(
+        args.decoder_checkpoint, device, args.decoder_checkpoint_key,
+    )
+    print(f"Rank {global_rank}: loaded decoder from {args.decoder_checkpoint}")
+    return decoder
+
+
+def resume_or_init_ema(args, model_without_ddp, optimizer, device):
+    checkpoint_path = Path(args.resume) / "checkpoint-last.pth" if args.resume else None
+    if checkpoint_path and checkpoint_path.exists():
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        model_without_ddp.load_state_dict(checkpoint['model'])
+        model_without_ddp.ema_params1 = [
+            checkpoint['model_ema1'][name].to(device)
+            for name, _ in model_without_ddp.named_parameters()
+        ]
+        model_without_ddp.ema_params2 = [
+            checkpoint['model_ema2'][name].to(device)
+            for name, _ in model_without_ddp.named_parameters()
+        ]
+        print("Resumed checkpoint from", args.resume)
+
+        if 'optimizer' in checkpoint and 'epoch' in checkpoint:
+            optimizer.load_state_dict(checkpoint['optimizer'])
+            args.start_epoch = checkpoint['epoch'] + 1
+            print("Loaded optimizer state")
+        return
+
+    model_without_ddp.ema_params1 = copy.deepcopy(list(model_without_ddp.parameters()))
+    model_without_ddp.ema_params2 = copy.deepcopy(list(model_without_ddp.parameters()))
+    print("Training from scratch")
+
+
 def main(args):
     misc.init_distributed_mode(args)
     print('Job directory:', os.path.dirname(os.path.realpath(__file__)))
@@ -215,88 +351,20 @@ def main(args):
     num_tasks = misc.get_world_size()
     global_rank = misc.get_rank()
 
-    # Set up TensorBoard logging (only on main process)
-    if global_rank == 0 and args.output_dir is not None:
-        os.makedirs(args.output_dir, exist_ok=True)
-        log_writer = SummaryWriter(log_dir=args.output_dir)
-    else:
-        log_writer = None
-    wandb_run = None
-    if global_rank == 0 and args.use_wandb:
-        if wandb is None:
-            raise ImportError(
-                "wandb is not installed. Install it with `pip install wandb` or disable --use_wandb."
-            )
-        wandb_run = wandb.init(
-            project=args.wandb_project,
-            entity=args.wandb_entity,
-            name=args.wandb_run_name,
-            config=vars(args),
-            dir=args.output_dir if args.output_dir else None,
-            mode=args.wandb_mode,
-        )
-        misc.configure_wandb_step_metrics(wandb_run)
+    log_writer, wandb_run = init_loggers(args, global_rank)
 
     latent_store = inspect_feature_shards(args.data_path, args.latent_dir_name)
     dino_store = inspect_feature_shards(args.data_path, args.dino_dir_name)
-    dataset_train = RamLoadedShardDataset(
-        latent_store=latent_store,
-        dino_store=dino_store,
-        batch_size=args.batch_size,
-        num_replicas=num_tasks,
-        rank=global_rank,
-        shuffle_shards=True,
-        seed=args.seed,
-        preload_next_shard=args.ram_shard_prefetch,
-    )
-    data_loader_train = torch.utils.data.DataLoader(
-        dataset=dataset_train,
-        batch_size=None,
-        num_workers=0,
-        pin_memory=args.pin_mem,
+    dataset_train, data_loader_train = build_train_loader(
+        args, latent_store, dino_store, num_tasks, global_rank
     )
     initial_steps_per_epoch = len(data_loader_train)
     if initial_steps_per_epoch <= 0:
         raise RuntimeError("Training dataloader has zero steps for this epoch.")
-    initial_optimizer_steps_per_epoch = (
-        initial_steps_per_epoch + args.accum_iter - 1
-    ) // args.accum_iter
-    epoch_control = dataset_train
+    initial_optimizer_steps_per_epoch = math.ceil(initial_steps_per_epoch / args.accum_iter)
 
     if global_rank == 0:
-        plan = dataset_train.describe_current_plan()
-        max_shard_samples = max(span.size for span in dataset_train.logical_shards)
-        approx_max_ram_bytes = max_shard_samples * (
-            latent_store.bytes_per_sample + dino_store.bytes_per_sample
-        )
-        approx_peak_ram_bytes = (
-            approx_max_ram_bytes * 2 if args.ram_shard_prefetch else approx_max_ram_bytes
-        )
-        print(
-            "RAM shard loading enabled using "
-            f"{plan['logical_shard_count']} logical shards from {plan['logical_shard_source']}."
-        )
-        print(
-            "Approx max per-rank shard working set: "
-            f"{approx_max_ram_bytes / (1024 ** 3):.2f} GiB."
-        )
-        if args.ram_shard_prefetch:
-            print(
-                "RAM shard prefetch enabled: peak per-rank working set can temporarily reach about "
-                f"{approx_peak_ram_bytes / (1024 ** 3):.2f} GiB while the next shard is staged."
-            )
-        print(
-            "Epoch 0 steps per rank: "
-            f"{plan['num_batches']} "
-            f"(samples/rank={plan['num_samples_per_rank']}, "
-            f"dropped_tail_per_rank={plan['dropped_samples_per_rank']})."
-        )
-        optimizer_updates = (plan['num_batches'] + args.accum_iter - 1) // args.accum_iter
-        print(
-            "Gradient accumulation: "
-            f"{args.accum_iter} micro-batches/update "
-            f"-> {optimizer_updates} optimizer updates per rank in epoch 0."
-        )
+        describe_dataset_plan(dataset_train, latent_store, dino_store, args)
 
     torch._dynamo.config.cache_size_limit = 128
     torch._dynamo.config.optimize_ddp = False
@@ -310,30 +378,7 @@ def main(args):
 
     model.to(device)
 
-    # Load custom decoder for eval (replaces SDXL VAE decoding)
-    decoder = None
-    needs_eval = args.online_eval or args.evaluate_gen
-    if needs_eval:
-        if args.fid_stats_path is None:
-            args.fid_stats_path = resolve_default_fid_stats_path(args.latent_size)
-        if args.fid_stats_path is None:
-            raise FileNotFoundError(
-                "Evaluation requires --fid_stats_path, and no built-in FID stats file was found "
-                f"for latent_size={args.latent_size} under {_FID_STATS_DIR}."
-            )
-        args.fid_stats_path = str(Path(args.fid_stats_path).expanduser().resolve())
-        if not os.path.isfile(args.fid_stats_path):
-            raise FileNotFoundError(
-                f"FID statistics file not found: {args.fid_stats_path}"
-            )
-        if not args.decoder_checkpoint:
-            raise ValueError(
-                "Evaluation requires --decoder_checkpoint pointing to a trained decoder."
-            )
-        decoder = load_decoder_for_eval(
-            args.decoder_checkpoint, device, args.decoder_checkpoint_key,
-        )
-        print(f"Rank {global_rank}: loaded decoder from {args.decoder_checkpoint}")
+    decoder = load_eval_decoder(args, device, global_rank)
 
     eff_batch_size = args.batch_size * args.accum_iter * misc.get_world_size()
     if args.lr is None:  # only base_lr (blr) is specified
@@ -365,43 +410,7 @@ def main(args):
     optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.95))
     print(optimizer)
 
-    # Resume from checkpoint if provided
-    checkpoint_path = os.path.join(
-        args.resume, "checkpoint-last.pth") if args.resume else None
-    if checkpoint_path and os.path.exists(checkpoint_path):
-        if hasattr(torch.serialization, "safe_globals"):
-            with torch.serialization.safe_globals([argparse.Namespace]):
-                checkpoint = torch.load(checkpoint_path, map_location='cpu')
-        else:
-            checkpoint = torch.load(checkpoint_path, map_location='cpu')
-        try:
-            model_without_ddp.load_state_dict(checkpoint['model'])
-        except RuntimeError as exc:
-            raise RuntimeError(
-                "Failed to load JiT checkpoint. This codebase now expects "
-                "image-prediction checkpoints, so native velocity-prediction "
-                "checkpoints are incompatible."
-            ) from exc
-
-        ema_state_dict1 = checkpoint['model_ema1']
-        ema_state_dict2 = checkpoint['model_ema2']
-        model_without_ddp.ema_params1 = [ema_state_dict1[name].cuda(
-        ) for name, _ in model_without_ddp.named_parameters()]
-        model_without_ddp.ema_params2 = [ema_state_dict2[name].cuda(
-        ) for name, _ in model_without_ddp.named_parameters()]
-        print("Resumed checkpoint from", args.resume)
-
-        if 'optimizer' in checkpoint and 'epoch' in checkpoint:
-            optimizer.load_state_dict(checkpoint['optimizer'])
-            args.start_epoch = checkpoint['epoch'] + 1
-            print("Loaded optimizer & scaler state!")
-        del checkpoint
-    else:
-        model_without_ddp.ema_params1 = copy.deepcopy(
-            list(model_without_ddp.parameters()))
-        model_without_ddp.ema_params2 = copy.deepcopy(
-            list(model_without_ddp.parameters()))
-        print("Training from scratch")
+    resume_or_init_ema(args, model_without_ddp, optimizer, device)
 
     try:
         wandb_epoch_end_step = args.start_epoch * initial_optimizer_steps_per_epoch
@@ -427,7 +436,7 @@ def main(args):
         print(f"Start training for {args.epochs} epochs")
         start_time = time.time()
         for epoch in range(args.start_epoch, args.epochs):
-            epoch_control.set_epoch(epoch)
+            dataset_train.set_epoch(epoch)
             steps_per_epoch = len(data_loader_train)
             if steps_per_epoch <= 0:
                 raise RuntimeError("Training dataloader has zero steps for this epoch.")
@@ -513,5 +522,6 @@ def main(args):
 
 if __name__ == '__main__':
     args = get_args_parser().parse_args()
-    Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+    if args.output_dir:
+        Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     main(args)
