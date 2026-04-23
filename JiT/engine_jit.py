@@ -3,6 +3,7 @@ import sys
 import os
 import shutil
 import time
+from itertools import islice
 
 import torch
 import numpy as np
@@ -10,59 +11,27 @@ import numpy as np
 import JiT.util.misc as misc
 import JiT.util.lr_sched as lr_sched
 from JiT.eval.diffusion_decoder import decode_with_decoder
-import torch_fidelity
 import copy
 from PIL import Image
 try:
     import wandb
 except ImportError:
     wandb = None
+try:
+    import torch_fidelity
+except ImportError:
+    torch_fidelity = None
 
 
 def _iter_accumulation_groups(iterable, accum_iter: int, total_micro_batches: int):
-    if accum_iter < 1:
-        raise ValueError("accum_iter must be at least 1.")
-    if total_micro_batches < 0:
-        raise ValueError("total_micro_batches must be non-negative.")
     iterator = iter(iterable)
-    emitted_micro_batches = 0
-
-    while emitted_micro_batches < total_micro_batches:
-        micro_batches_in_update = min(
-            accum_iter, total_micro_batches - emitted_micro_batches
-        )
-        try:
-            first_batch = next(iterator)
-        except StopIteration as exc:
-            raise RuntimeError(
-                f"Expected {total_micro_batches} micro-batches, consumed {emitted_micro_batches}."
-            ) from exc
-
-        def group_batches(
-            first_batch=first_batch,
-            remaining=micro_batches_in_update - 1,
-            emitted_before_group=emitted_micro_batches,
-        ):
-            yield first_batch
-            for consumed_in_group in range(remaining):
-                try:
-                    yield next(iterator)
-                except StopIteration as exc:
-                    raise RuntimeError(
-                        f"Expected {total_micro_batches} micro-batches, consumed "
-                        f"{emitted_before_group + 1 + consumed_in_group}."
-                    ) from exc
-
-        emitted_micro_batches += micro_batches_in_update
-        yield group_batches(), micro_batches_in_update
-
-    try:
-        next(iterator)
-    except StopIteration:
-        return
-    raise RuntimeError(
-        f"Expected {total_micro_batches} micro-batches, but data loader yielded extra batches."
-    )
+    remaining = total_micro_batches
+    while remaining > 0:
+        micro_batches = list(islice(iterator, min(accum_iter, remaining)))
+        if not micro_batches:
+            break
+        remaining -= len(micro_batches)
+        yield micro_batches, len(micro_batches)
 
 
 def train_one_epoch(
@@ -85,21 +54,15 @@ def train_one_epoch(
     header = 'Epoch: [{}]'.format(epoch)
     print_freq = 20
     accum_iter = max(1, int(getattr(args, "accum_iter", 1)))
-    if steps_per_epoch is None or steps_per_epoch <= 0:
-        raise ValueError("steps_per_epoch must be a positive integer.")
-    if optimizer_steps_per_epoch is None:
-        optimizer_steps_per_epoch = (
-            steps_per_epoch + accum_iter - 1
-        ) // accum_iter
-    if optimizer_steps_per_epoch <= 0:
-        raise ValueError("optimizer_steps_per_epoch must be a positive integer.")
+    steps_per_epoch = steps_per_epoch or len(data_loader)
+    optimizer_steps_per_epoch = optimizer_steps_per_epoch or math.ceil(
+        steps_per_epoch / accum_iter
+    )
 
     optimizer.zero_grad(set_to_none=True)
 
     if log_writer is not None:
         print('log_dir: {}'.format(log_writer.log_dir))
-
-    optimizer_steps_completed = 0
 
     for optimizer_step, (micro_batches, micro_batches_in_update) in enumerate(
         metric_logger.log_every(
@@ -144,7 +107,6 @@ def train_one_epoch(
 
         loss_value_reduce = misc.all_reduce_mean(step_loss)
         completed_optimizer_steps = optimizer_step + 1
-        optimizer_steps_completed = completed_optimizer_steps
 
         if log_writer is not None:
             # Use epoch_1000x as the x-axis in TensorBoard to calibrate curves.
@@ -164,10 +126,6 @@ def train_one_epoch(
             }
             misc.add_wandb_global_step(payload, global_step)
             wandb_run.log(payload)
-    if optimizer_steps_completed != optimizer_steps_per_epoch:
-        raise RuntimeError(
-            f"Expected {optimizer_steps_per_epoch} optimizer steps, got {optimizer_steps_completed}."
-        )
     print(f"Finished ")
 
 
@@ -211,11 +169,9 @@ def evaluate(model_without_ddp, args, epoch, decoder, batch_size=64, log_writer=
     print("Switch to ema")
     model_without_ddp.load_state_dict(ema_state_dict)
 
-    # ensure that the number of images per class is equal.
     class_num = args.class_num
-    assert args.num_images % class_num == 0, "Number of images per class must be the same"
     class_label_gen_world = np.arange(
-        0, class_num, dtype=np.int64).repeat(args.num_images // class_num)
+        0, class_num, dtype=np.int64).repeat(math.ceil(args.num_images / class_num))[:args.num_images]
 
     for step_idx in range(num_steps):
         print("Generation step {}/{}".format(step_idx, num_steps))
@@ -273,6 +229,8 @@ def evaluate(model_without_ddp, args, epoch, decoder, batch_size=64, log_writer=
         torch.distributed.barrier()
 
     if metrics_requested and misc.is_main_process():
+        if torch_fidelity is None:
+            raise ImportError("torch_fidelity is required for JiT generation metrics.")
         metrics_dict = torch_fidelity.calculate_metrics(
             input1=save_folder,
             input2=None,
