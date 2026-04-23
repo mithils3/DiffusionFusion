@@ -72,10 +72,28 @@ class DenoiserSamplingTests(unittest.TestCase):
             cfg=1.0,
             interval_min=0.0,
             interval_max=1.0,
-            dino_time_shift=0.0,
+            dino_time_shift=None,
         )
         args.update(overrides)
         return SimpleNamespace(**args)
+
+    def test_default_dino_time_shift_matches_rae_dim_ratio(self):
+        with patch.dict(
+            denoiser_module.JiT_models,
+            {"test-model": lambda **_kwargs: _ConstantPredictor(0.0)},
+            clear=False,
+        ):
+            model = denoiser_module.Denoiser(
+                self._build_args(
+                    latent_size=32,
+                    dino_hidden_size=768,
+                    dino_patches=16,
+                )
+            )
+
+        rae_shift = math.sqrt((768 * 16 * 16) / (4 * 32 * 32))
+        self.assertAlmostEqual(math.exp(model.dino_time_shift), rae_shift)
+        self.assertAlmostEqual(model.dino_time(torch.tensor([0.5])).item(), rae_shift / (1.0 + rae_shift))
 
     def test_dino_time_shift_is_logit_space_and_preserves_endpoints(self):
         with patch.dict(
@@ -100,7 +118,7 @@ class DenoiserSamplingTests(unittest.TestCase):
             {"test-model": lambda **_kwargs: predictor},
             clear=False,
         ):
-            model = denoiser_module.Denoiser(self._build_args())
+            model = denoiser_module.Denoiser(self._build_args(dino_time_shift=0.0))
 
         z_latent = torch.zeros(1, 1, 1, 1)
         z_dino = torch.zeros(1, 1, 1, 1)
@@ -120,7 +138,7 @@ class DenoiserSamplingTests(unittest.TestCase):
             clear=False,
         ):
             model = denoiser_module.Denoiser(
-                self._build_args(sampling_method="euler")
+                self._build_args(sampling_method="euler", dino_time_shift=0.0)
             )
 
         z_latent = torch.zeros(1, 1, 1, 1)
@@ -143,7 +161,7 @@ class DenoiserSamplingTests(unittest.TestCase):
             {"test-model": lambda **_kwargs: _ConstantPredictor(10.0)},
             clear=False,
         ):
-            model = denoiser_module.Denoiser(self._build_args())
+            model = denoiser_module.Denoiser(self._build_args(dino_time_shift=0.0))
 
         z_latent = torch.zeros(1, 1, 1, 1)
         z_dino = torch.zeros(1, 1, 1, 1)
@@ -161,7 +179,7 @@ class DenoiserSamplingTests(unittest.TestCase):
             {"test-model": lambda **_kwargs: _FinalStepPredictor(10.0)},
             clear=False,
         ):
-            model = denoiser_module.Denoiser(self._build_args())
+            model = denoiser_module.Denoiser(self._build_args(dino_time_shift=0.0))
 
         labels = torch.zeros(1, dtype=torch.long)
         latent, dino = model.generate(labels)

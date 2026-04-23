@@ -70,7 +70,6 @@ NUM_IMAGES="${NUM_IMAGES:-10000}"
 EVAL_FREQ="${EVAL_FREQ:-20}"
 EPOCHS="${EPOCHS:-80}"
 LR_SCHEDULE="${LR_SCHEDULE:-constant}"
-DINO_TIME_SHIFT="${DINO_TIME_SHIFT:-0.0}"
 BATCH_SIZE="${BATCH_SIZE:-128}"
 ACCUM_ITER="${ACCUM_ITER:-2}"
 mkdir -p "${OUTPUT_DIR}"
@@ -84,7 +83,6 @@ main_jit.py \
 --P_mean -0.8 \
 --P_std 0.8 \
 --noise_scale 1.0 \
---dino_time_shift "${DINO_TIME_SHIFT}" \
 --batch_size "${BATCH_SIZE}" \
 --accum_iter "${ACCUM_ITER}" \
 --blr 5e-5 \

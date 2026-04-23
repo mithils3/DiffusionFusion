@@ -100,8 +100,8 @@ def get_args_parser():
     parser.add_argument('--t_eps', default=5e-2, type=float)
     parser.add_argument('--inference_t_eps', default=1e-5, type=float,
                         help='Clamp floor used only during inference velocity conversion')
-    parser.add_argument('--dino_time_shift', default=0.0, type=float,
-                        help='Logit-space shift applied to the DINO denoising time schedule')
+    parser.add_argument('--dino_time_shift', default=None, type=float,
+                        help='Optional logit-space DINO time shift override; defaults to the RAE sqrt(dim/base) schedule')
     parser.add_argument('--label_drop_prob', default=0.1, type=float)
     parser.add_argument('--latent_loss_weight', default=1.0, type=float,
                         help='Weight applied to the latent denoising loss')

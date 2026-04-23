@@ -1,4 +1,5 @@
 import argparse
+import math
 from typing import Callable
 
 import torch
@@ -36,7 +37,7 @@ class Denoiser(nn.Module):
         self.noise_scale: float = args.noise_scale
         self.latent_loss_weight: float = getattr(args, "latent_loss_weight", 1.0)
         self.dino_loss_weight: float = getattr(args, "dino_loss_weight", 1.0)
-        self.dino_time_shift: float = float(getattr(args, "dino_time_shift", 0.0))
+        self.dino_time_shift: float = self._resolve_dino_time_shift(args)
 
         # ema
         self.ema_decay1: float = args.ema_decay1
@@ -61,6 +62,18 @@ class Denoiser(nn.Module):
     def sample_t(self, n: int, device: torch.device | None = None) -> torch.Tensor:
         z = torch.randn(n, device=device) * self.P_std + self.P_mean
         return torch.sigmoid(z)
+
+    def _default_dino_time_shift(self) -> float:
+        dino_dim = self.dino_hidden_size * self.dino_patches * self.dino_patches
+        latent_dim = self.latent_in_chans * self.latent_size * self.latent_size
+        shift = math.sqrt(dino_dim / latent_dim)
+        return math.log(max(1.0, shift))
+
+    def _resolve_dino_time_shift(self, args: argparse.Namespace) -> float:
+        shift = getattr(args, "dino_time_shift", None)
+        if shift is None:
+            return self._default_dino_time_shift()
+        return float(shift)
 
     def dino_time(self, t: torch.Tensor) -> torch.Tensor:
         if self.dino_time_shift == 0.0:
