@@ -54,7 +54,7 @@ def get_args_parser():
     parser = argparse.ArgumentParser('JiT', add_help=False)
 
     # architecture
-    parser.add_argument('--model', default='JiT-B/16', type=str, metavar='MODEL',
+    parser.add_argument('--model', default='JiT-Dual-B/2-4C-896', type=str, metavar='MODEL',
                         help='Name of the model to train')
     parser.add_argument('--latent_size', default=32,
                         type=int, help='Latent size')

@@ -8,11 +8,19 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.backends.cudnn as cudnn
-from torch.utils.tensorboard import SummaryWriter
+
+try:
+    from torch.utils.tensorboard import SummaryWriter
+except ImportError:
+    SummaryWriter = None
 
 import JiT.util.misc as misc
 from JiT.decoder import Decoder, DecoderReconstructionModel, load_decoder_plan_config
-from JiT.decoder.dataset import RamLoadedShardDataset, inspect_feature_shards
+from JiT.decoder.dataset import (
+    RamLoadedShardDataset,
+    inspect_feature_shards,
+    resolve_feature_dir_name,
+)
 from JiT.decoder.train import evaluate, train_epoch
 
 try:
@@ -50,23 +58,6 @@ def build_decoder_ema_model(
     for parameter in ema_model.parameters():
         parameter.requires_grad_(False)
     return ema_model
-
-
-def maybe_append_split_suffix(dataset_name: str, split: str) -> str:
-    if split == "train" or dataset_name.endswith(f"_{split}"):
-        return dataset_name
-    return f"{dataset_name}_{split}"
-
-
-def resolve_feature_dir_name(
-    explicit_name: str | None,
-    default_name: str,
-    split: str,
-) -> str:
-    base_name = explicit_name or default_name
-    if explicit_name:
-        return explicit_name
-    return maybe_append_split_suffix(base_name, split)
 
 
 def get_args_parser() -> argparse.ArgumentParser:
@@ -440,8 +431,7 @@ def maybe_resume_checkpoint(
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     model_without_ddp.load_state_dict(checkpoint["model"])
     if ema_model is not None:
-        ema_state = checkpoint.get("model_ema", checkpoint["model"])
-        ema_model.load_state_dict(ema_state)
+        ema_model.load_state_dict(checkpoint["model_ema"])
 
     if "optimizer" in checkpoint and "epoch" in checkpoint:
         optimizer.load_state_dict(checkpoint["optimizer"])
@@ -546,7 +536,8 @@ def main(args: argparse.Namespace) -> None:
     log_writer = None
     if global_rank == 0 and args.output_dir:
         os.makedirs(args.output_dir, exist_ok=True)
-        log_writer = SummaryWriter(log_dir=args.output_dir)
+        if SummaryWriter is not None:
+            log_writer = SummaryWriter(log_dir=args.output_dir)
 
     wandb_run = None
     if global_rank == 0 and args.use_wandb:

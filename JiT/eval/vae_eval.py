@@ -2,22 +2,30 @@
 from __future__ import annotations
 
 import argparse
-import datetime
 import json
 import math
-import os
 import shutil
-from contextlib import nullcontext
 from copy import deepcopy
 from pathlib import Path
 
 import numpy as np
 import torch
-import torch.distributed as dist
-from PIL import Image
 
 from JiT.denoiser import Denoiser
 from JiT.eval.diffusion_decoder import decode_with_decoder, load_decoder_for_eval
+from JiT.eval.utils import (
+    autocast_context,
+    barrier_if_distributed,
+    cleanup_distributed,
+    init_distributed,
+    load_checkpoint_args as _load_checkpoint_args,
+    load_checkpoint_payload,
+    log_rank0,
+    resolve_strict_state_dict,
+    run_torch_fidelity_metrics,
+    save_uint8_pngs as _save_uint8_pngs,
+    select_checkpoint_key as _select_checkpoint_key,
+)
 
 
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -135,52 +143,6 @@ def resolve_default_fid_stats_path(latent_size: int) -> str | None:
     return None
 
 
-def init_distributed(
-    device_arg: str,
-    timeout_sec: int,
-) -> tuple[torch.device, int, int, bool]:
-    if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
-        if not torch.cuda.is_available():
-            raise RuntimeError("Distributed evaluation requires CUDA.")
-
-        rank = int(os.environ["RANK"])
-        world_size = int(os.environ["WORLD_SIZE"])
-        local_rank = int(os.environ.get("LOCAL_RANK", rank % torch.cuda.device_count()))
-        torch.cuda.set_device(local_rank)
-        dist.init_process_group(
-            "nccl",
-            timeout=datetime.timedelta(seconds=int(timeout_sec)),
-            device_id=local_rank,
-        )
-        return torch.device("cuda", local_rank), rank, world_size, True
-
-    device = torch.device(device_arg)
-    if device.type == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("CUDA was requested but no CUDA device is available.")
-    return device, 0, 1, False
-
-
-def barrier_if_distributed(
-    is_distributed: bool,
-    device: torch.device | None = None,
-) -> None:
-    if is_distributed:
-        device_ids = None
-        if device is not None and device.type == "cuda" and device.index is not None:
-            device_ids = [device.index]
-        dist.barrier(device_ids=device_ids)
-
-
-def cleanup_distributed(is_distributed: bool) -> None:
-    if is_distributed and dist.is_initialized():
-        dist.destroy_process_group()
-
-
-def log_rank0(rank: int, message: str) -> None:
-    if rank == 0:
-        print(message, flush=True)
-
-
 def resolve_checkpoint_path(
     checkpoint: str | None,
     resume_dir: str | None,
@@ -192,35 +154,17 @@ def resolve_checkpoint_path(
     raise ValueError("Pass either --checkpoint or --resume-dir.")
 
 
-def load_checkpoint_payload(checkpoint_path: Path) -> dict:
-    if hasattr(torch.serialization, "safe_globals"):
-        with torch.serialization.safe_globals([argparse.Namespace]):
-            return torch.load(checkpoint_path, map_location="cpu")
-    return torch.load(checkpoint_path, map_location="cpu")
-
-
 def load_checkpoint_args(checkpoint_payload: dict) -> argparse.Namespace:
-    args_payload = checkpoint_payload.get("args")
-    if isinstance(args_payload, argparse.Namespace):
-        return deepcopy(args_payload)
-    if isinstance(args_payload, dict):
-        return argparse.Namespace(**args_payload)
-    raise KeyError(
-        "JiT checkpoint does not contain a supported `args` payload. "
-        "Expected argparse.Namespace or dict."
-    )
+    return _load_checkpoint_args(checkpoint_payload, label="JiT")
 
 
 def select_checkpoint_key(args: argparse.Namespace, checkpoint_payload: dict) -> str:
-    if args.checkpoint_key == "auto":
-        if "model_ema1" in checkpoint_payload:
-            return "model_ema1"
-        return "model"
-    if args.checkpoint_key not in checkpoint_payload:
-        raise KeyError(
-            f"Checkpoint key `{args.checkpoint_key}` not found in the JiT checkpoint."
-        )
-    return args.checkpoint_key
+    return _select_checkpoint_key(
+        args.checkpoint_key,
+        checkpoint_payload,
+        auto_key="model_ema1",
+        label="JiT",
+    )
 
 
 def apply_generation_overrides(
@@ -249,50 +193,7 @@ def resolve_denoiser_state_dict(
     checkpoint_state: dict,
     model: torch.nn.Module,
 ) -> tuple[dict, str | None]:
-    if not isinstance(checkpoint_state, dict):
-        raise TypeError(
-            "JiT checkpoint entry must be a state dict mapping, "
-            f"got {type(checkpoint_state).__name__}."
-        )
-
-    expected_keys = set(model.state_dict().keys())
-    candidate_state = dict(checkpoint_state)
-    stripped_segments: list[str] = []
-
-    for _ in range(4):
-        if set(candidate_state.keys()) == expected_keys:
-            stripped_prefix = ".".join(stripped_segments) if stripped_segments else None
-            return candidate_state, stripped_prefix
-        if not candidate_state or any("." not in key for key in candidate_state):
-            break
-
-        head_segments = {key.split(".", 1)[0] for key in candidate_state}
-        if len(head_segments) != 1:
-            break
-
-        segment = next(iter(head_segments))
-        stripped_segments.append(segment)
-        candidate_state = {
-            key.split(".", 1)[1]: value
-            for key, value in candidate_state.items()
-        }
-
-    for prefix in ("module.", "_orig_mod.", "model.", "module.model.", "_orig_mod.model."):
-        filtered_state = {
-            key[len(prefix):]: value
-            for key, value in checkpoint_state.items()
-            if key.startswith(prefix)
-        }
-        if set(filtered_state.keys()) == expected_keys:
-            return filtered_state, prefix.rstrip(".")
-
-    raise RuntimeError("JiT checkpoint state dict is incompatible with the evaluation model.")
-
-
-def autocast_context(device: torch.device):
-    if device.type == "cuda":
-        return torch.autocast("cuda", dtype=torch.bfloat16)
-    return nullcontext()
+    return resolve_strict_state_dict(checkpoint_state, model, label="JiT"), None
 
 
 def load_vae_decoder(
@@ -365,38 +266,7 @@ def save_uint8_pngs(
     indices: np.ndarray,
     output_dir: Path,
 ) -> None:
-    for image_array, sample_idx in zip(images, indices.tolist(), strict=True):
-        Image.fromarray(image_array).save(
-            output_dir / f"{sample_idx:05d}.png",
-            format="PNG",
-            compress_level=0,
-        )
-
-
-def run_torch_fidelity_metrics(
-    image_dir: Path,
-    fid_stats_path: Path,
-    device: torch.device,
-) -> dict:
-    try:
-        import torch_fidelity
-    except ImportError as exc:
-        raise ImportError(
-            "torch-fidelity is required for generation evaluation. "
-            "Install it from requirements.txt."
-        ) from exc
-
-    return torch_fidelity.calculate_metrics(
-        input1=str(image_dir),
-        input2=None,
-        fid_statistics_file=str(fid_stats_path),
-        cuda=device.type == "cuda",
-        isc=True,
-        fid=True,
-        kid=False,
-        prc=False,
-        verbose=True,
-    )
+    _save_uint8_pngs(images, indices, output_dir, width=5)
 
 
 @torch.inference_mode()

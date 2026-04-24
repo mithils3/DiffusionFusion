@@ -3,19 +3,23 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 from pathlib import Path
 
 import numpy as np
 import torch
-import torch.distributed as dist
 from datasets import load_dataset
-from PIL import Image
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from diffusers.models import AutoencoderKL
 
+from JiT.eval.utils import (
+    barrier_if_distributed,
+    cleanup_distributed,
+    init_distributed,
+    run_pytorch_fid,
+    save_uint8_pngs as _save_uint8_pngs,
+)
 from JiT.util.image_transforms import build_center_crop_normalize_transform
 
 
@@ -31,36 +35,6 @@ def collate_fn(batch):
         "image": images,
         "image_uint8": image_uint8,
     }
-
-
-def init_distributed(device_arg: str) -> tuple[torch.device, int, int, bool]:
-    if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
-        if not torch.cuda.is_available():
-            raise RuntimeError("Distributed evaluation requires CUDA.")
-
-        rank = int(os.environ["RANK"])
-        world_size = int(os.environ["WORLD_SIZE"])
-        local_rank = int(os.environ.get("LOCAL_RANK", rank %
-                         torch.cuda.device_count()))
-        torch.cuda.set_device(local_rank)
-        dist.init_process_group("nccl")
-        return torch.device("cuda", local_rank), rank, world_size, True
-
-    device = torch.device(device_arg)
-    if device.type == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError(
-            "CUDA was requested but no CUDA device is available.")
-    return device, 0, 1, False
-
-
-def barrier_if_distributed(is_distributed: bool) -> None:
-    if is_distributed:
-        dist.barrier()
-
-
-def cleanup_distributed(is_distributed: bool) -> None:
-    if is_distributed and dist.is_initialized():
-        dist.destroy_process_group()
 
 
 def parse_args() -> argparse.Namespace:
@@ -113,40 +87,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def save_uint8_pngs(images: np.ndarray, sample_ids: np.ndarray, output_dir: Path) -> None:
-    for image_array, sample_id in zip(images, sample_ids.tolist(), strict=True):
-        Image.fromarray(image_array).save(
-            output_dir / f"{sample_id:08d}.png",
-            format="PNG",
-            compress_level=0,
-        )
-
-
-def run_pytorch_fid(
-    *,
-    reference_dir: Path,
-    recon_dir: Path,
-    device: torch.device,
-    batch_size: int,
-    dims: int,
-    num_workers: int,
-) -> float:
-    try:
-        from pytorch_fid.fid_score import calculate_fid_given_paths
-    except ImportError as exc:
-        raise ImportError(
-            "pytorch-fid is required for SD-VAE evaluation. Install it with "
-            "`pip install pytorch-fid` or from requirements.txt."
-        ) from exc
-
-    return float(
-        calculate_fid_given_paths(
-            [str(reference_dir), str(recon_dir)],
-            batch_size=batch_size,
-            device=device,
-            dims=dims,
-            num_workers=num_workers,
-        )
-    )
+    _save_uint8_pngs(images, sample_ids, output_dir, width=8)
 
 
 @torch.inference_mode()

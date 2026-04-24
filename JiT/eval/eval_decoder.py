@@ -3,19 +3,33 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
-from contextlib import nullcontext
 from pathlib import Path
 
 import numpy as np
 import torch
 import torch.distributed as dist
-from PIL import Image
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from JiT.decoder import Decoder
-from JiT.decoder.dataset import RamLoadedShardDataset, inspect_feature_shards
+from JiT.decoder.dataset import (
+    RamLoadedShardDataset,
+    inspect_feature_shards,
+    resolve_feature_dir_name as _resolve_feature_dir_name,
+)
+from JiT.eval.utils import (
+    autocast_context,
+    barrier_if_distributed,
+    cleanup_distributed,
+    images_to_uint8,
+    init_distributed,
+    load_checkpoint_args as _load_checkpoint_args,
+    log_rank0,
+    resolve_strict_state_dict,
+    run_pytorch_fid,
+    save_uint8_pngs as _save_uint8_pngs,
+    select_checkpoint_key as _select_checkpoint_key,
+)
 
 
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -101,49 +115,10 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def init_distributed(device_arg: str) -> tuple[torch.device, int, int, bool]:
-    if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
-        if not torch.cuda.is_available():
-            raise RuntimeError("Distributed evaluation requires CUDA.")
-
-        rank = int(os.environ["RANK"])
-        world_size = int(os.environ["WORLD_SIZE"])
-        local_rank = int(os.environ.get("LOCAL_RANK", rank % torch.cuda.device_count()))
-        torch.cuda.set_device(local_rank)
-        dist.init_process_group("nccl", device_id=local_rank)
-        return torch.device("cuda", local_rank), rank, world_size, True
-
-    device = torch.device(device_arg)
-    if device.type == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("CUDA was requested but no CUDA device is available.")
-    return device, 0, 1, False
-
-
-def barrier_if_distributed(
-    is_distributed: bool,
-    device: torch.device | None = None,
-) -> None:
-    if is_distributed:
-        device_ids = None
-        if device is not None and device.type == "cuda" and device.index is not None:
-            device_ids = [device.index]
-        dist.barrier(device_ids=device_ids)
-
-
-def cleanup_distributed(is_distributed: bool) -> None:
-    if is_distributed and dist.is_initialized():
-        dist.destroy_process_group()
-
-
-def log_rank0(rank: int, message: str) -> None:
-    if rank == 0:
-        print(message, flush=True)
-
-
 def maybe_append_split_suffix(dataset_name: str, split: str) -> str:
-    if split == "train" or dataset_name.endswith(f"_{split}"):
-        return dataset_name
-    return f"{dataset_name}_{split}"
+    from JiT.util.feature_shards import maybe_append_split_suffix as helper
+
+    return helper(dataset_name, split)
 
 
 def resolve_feature_dir_name(
@@ -152,10 +127,11 @@ def resolve_feature_dir_name(
     default_name: str,
     split: str,
 ) -> str:
-    base_name = explicit_name or checkpoint_name or default_name
-    if explicit_name:
-        return explicit_name
-    return maybe_append_split_suffix(base_name, split)
+    return _resolve_feature_dir_name(
+        explicit_name,
+        checkpoint_name or default_name,
+        split,
+    )
 
 
 def require_checkpoint_arg(checkpoint_args: argparse.Namespace, name: str):
@@ -168,72 +144,23 @@ def require_checkpoint_arg(checkpoint_args: argparse.Namespace, name: str):
 
 
 def load_checkpoint_args(checkpoint_payload: dict) -> argparse.Namespace:
-    args_dict = checkpoint_payload.get("args")
-    if not isinstance(args_dict, dict):
-        raise KeyError(
-            "Decoder checkpoint does not contain the saved `args` payload needed to rebuild the model."
-        )
-    return argparse.Namespace(**args_dict)
+    return _load_checkpoint_args(checkpoint_payload, label="Decoder")
 
 
 def select_checkpoint_key(args: argparse.Namespace, checkpoint_payload: dict) -> str:
-    if args.checkpoint_key == "auto":
-        return "model_ema" if "model_ema" in checkpoint_payload else "model"
-    if args.checkpoint_key not in checkpoint_payload:
-        raise KeyError(
-            f"Checkpoint key `{args.checkpoint_key}` not found in {args.checkpoint}."
-        )
-    return args.checkpoint_key
+    return _select_checkpoint_key(
+        args.checkpoint_key,
+        checkpoint_payload,
+        auto_key="model_ema",
+        label="Decoder",
+    )
 
 
 def resolve_decoder_state_dict(
     checkpoint_state: dict,
     model: torch.nn.Module,
 ) -> tuple[dict, str | None]:
-    if not isinstance(checkpoint_state, dict):
-        raise TypeError(
-            "Decoder checkpoint entry must be a state dict mapping, "
-            f"got {type(checkpoint_state).__name__}."
-        )
-
-    expected_keys = set(model.state_dict().keys())
-    candidate_state = dict(checkpoint_state)
-    stripped_segments: list[str] = []
-
-    for _ in range(4):
-        if set(candidate_state.keys()) == expected_keys:
-            stripped_prefix = ".".join(stripped_segments) if stripped_segments else None
-            return candidate_state, stripped_prefix
-        if not candidate_state or any("." not in key for key in candidate_state):
-            break
-
-        head_segments = {key.split(".", 1)[0] for key in candidate_state}
-        if len(head_segments) != 1:
-            break
-
-        segment = next(iter(head_segments))
-        stripped_segments.append(segment)
-        candidate_state = {
-            key.split(".", 1)[1]: value
-            for key, value in candidate_state.items()
-        }
-
-    for prefix in ("decoder.", "module.decoder.", "_orig_mod.decoder."):
-        filtered_state = {
-            key[len(prefix):]: value
-            for key, value in checkpoint_state.items()
-            if key.startswith(prefix)
-        }
-        if set(filtered_state.keys()) == expected_keys:
-            return filtered_state, prefix.rstrip(".")
-
-    checkpoint_keys = sorted(str(checkpoint_state_key) for checkpoint_state_key in checkpoint_state.keys())
-    expected_key_list = sorted(expected_keys)
-    raise RuntimeError(
-        "Decoder checkpoint is incompatible with the eval model. "
-        f"Sample checkpoint keys: {checkpoint_keys[:5]}; "
-        f"sample expected keys: {expected_key_list[:5]}."
-    )
+    return resolve_strict_state_dict(checkpoint_state, model, label="Decoder"), None
 
 
 def build_decoder_model_from_args(checkpoint_args: argparse.Namespace) -> Decoder:
@@ -301,55 +228,8 @@ def extract_image_normalization(data_loader: DataLoader) -> tuple[torch.Tensor, 
     )
 
 
-def images_to_uint8(images: torch.Tensor, mean: torch.Tensor, std: torch.Tensor) -> np.ndarray:
-    images = images.detach().float().cpu()
-    images = images * std + mean
-    images = images.clamp_(0.0, 1.0)
-    images = images.mul(255.0).round().to(torch.uint8)
-    return images.permute(0, 2, 3, 1).numpy()
-
-
 def save_uint8_pngs(images: np.ndarray, sample_ids: np.ndarray, output_dir: Path) -> None:
-    for image_array, sample_id in zip(images, sample_ids.tolist(), strict=True):
-        Image.fromarray(image_array).save(
-            output_dir / f"{sample_id:08d}.png",
-            format="PNG",
-            compress_level=0,
-        )
-
-
-def run_pytorch_fid(
-    *,
-    reference_dir: Path,
-    recon_dir: Path,
-    device: torch.device,
-    batch_size: int,
-    dims: int,
-    num_workers: int,
-) -> float:
-    try:
-        from pytorch_fid.fid_score import calculate_fid_given_paths
-    except ImportError as exc:
-        raise ImportError(
-            "pytorch-fid is required for decoder evaluation. Install it with "
-            "`pip install pytorch-fid` or from requirements.txt."
-        ) from exc
-
-    return float(
-        calculate_fid_given_paths(
-            [str(reference_dir), str(recon_dir)],
-            batch_size=batch_size,
-            device=device,
-            dims=dims,
-            num_workers=num_workers,
-        )
-    )
-
-
-def autocast_context(device: torch.device):
-    if device.type == "cuda":
-        return torch.autocast("cuda", dtype=torch.bfloat16)
-    return nullcontext()
+    _save_uint8_pngs(images, sample_ids, output_dir, width=8)
 
 
 @torch.inference_mode()

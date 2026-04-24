@@ -6,7 +6,6 @@ import time
 from collections.abc import Callable
 from contextlib import ExitStack, contextmanager, nullcontext
 from itertools import islice
-from pathlib import Path
 
 import numpy as np
 import torch
@@ -160,17 +159,6 @@ def _require_wandb():
     return wandb
 
 
-def _require_pytorch_fid():
-    try:
-        from pytorch_fid.fid_score import calculate_fid_given_paths
-    except ImportError as exc:
-        raise ImportError(
-            "pytorch-fid is required for decoder evaluation. Install it with "
-            "`pip install pytorch-fid` or from requirements.txt."
-        ) from exc
-    return calculate_fid_given_paths
-
-
 def _require_torch_fidelity():
     try:
         import torch_fidelity
@@ -179,36 +167,6 @@ def _require_torch_fidelity():
             "torch_fidelity is required for decoder evaluation metrics. Install it to run decoder FID/IS."
         ) from exc
     return torch_fidelity
-
-
-def _save_uint8_pngs(images: np.ndarray, sample_ids: np.ndarray, output_dir: Path) -> None:
-    for image_array, sample_id in zip(images, sample_ids.tolist(), strict=True):
-        Image.fromarray(image_array).save(
-            output_dir / f"{sample_id:08d}.png",
-            format="PNG",
-            compress_level=0,
-        )
-
-
-def _run_pytorch_fid(
-    *,
-    reference_dir: Path,
-    recon_dir: Path,
-    device: torch.device,
-    batch_size: int,
-    dims: int,
-    num_workers: int,
-) -> float:
-    calculate_fid_given_paths = _require_pytorch_fid()
-    return float(
-        calculate_fid_given_paths(
-            [str(reference_dir), str(recon_dir)],
-            batch_size=batch_size,
-            device=device,
-            dims=dims,
-            num_workers=num_workers,
-        )
-    )
 
 
 def _apply_discriminator_augment(images: torch.Tensor, gan_state: DecoderGanTrainingState) -> torch.Tensor:

@@ -890,18 +890,6 @@ class JiTDualStream(nn.Module):
         return output, dino_tokens
 
 
-def JiT_B_16(**kwargs):
-    return JiT(depth=12, hidden_size=768, num_heads=12,
-               bottleneck_dim=128, in_context_len=32, in_context_start=4, patch_size=16, **kwargs)
-
-
-def JiT_B_2_4C(**kwargs):
-    kwargs.setdefault("input_size", 32)
-    kwargs.setdefault("in_channels", 4)
-    return JiT(depth=12, hidden_size=1024, num_heads=16,
-               bottleneck_dim=128, in_context_len=32, in_context_start=4, patch_size=2, **kwargs)
-
-
 def JiT_Dual_B_2_4C_896(**kwargs):
     kwargs.setdefault("input_size", 32)
     kwargs.setdefault("in_channels", 4)
@@ -919,59 +907,6 @@ def JiT_Dual_B_2_4C_896(**kwargs):
     )
 
 
-def JiT_L_2_4C(**kwargs):
-    kwargs.setdefault("input_size", 32)
-    return JiT(depth=24, hidden_size=1024, num_heads=16,
-               bottleneck_dim=128, in_context_len=32, in_context_start=8, patch_size=2, **kwargs)
-
-
-def JiT_B_4_4C(**kwargs):
-    kwargs.setdefault("input_size", 32)
-    return JiT(depth=12, hidden_size=768, num_heads=12,
-               bottleneck_dim=128, in_context_len=32, in_context_start=4, patch_size=4,  **kwargs)
-
-
-def JiT_L_4_4C(**kwargs):
-    kwargs.setdefault("input_size", 32)
-    return JiT(depth=24, hidden_size=1024, num_heads=16,
-               bottleneck_dim=128, in_context_len=32, in_context_start=8, patch_size=4, **kwargs)
-
-
-def JiT_B_32(**kwargs):
-    return JiT(depth=12, hidden_size=768, num_heads=12,
-               bottleneck_dim=128, in_context_len=32, in_context_start=4, patch_size=32, **kwargs)
-
-
-def JiT_L_16(**kwargs):
-    return JiT(depth=24, hidden_size=1024, num_heads=16,
-               bottleneck_dim=128, in_context_len=32, in_context_start=8, patch_size=16, **kwargs)
-
-
-def JiT_L_32(**kwargs):
-    return JiT(depth=24, hidden_size=1024, num_heads=16,
-               bottleneck_dim=128, in_context_len=32, in_context_start=8, patch_size=32, **kwargs)
-
-
-def JiT_H_16(**kwargs):
-    return JiT(depth=32, hidden_size=1280, num_heads=16,
-               bottleneck_dim=256, in_context_len=32, in_context_start=10, patch_size=16, **kwargs)
-
-
-def JiT_H_32(**kwargs):
-    return JiT(depth=32, hidden_size=1280, num_heads=16,
-               bottleneck_dim=256, in_context_len=32, in_context_start=10, patch_size=32, **kwargs)
-
-
 JiT_models = {
-    'JiT-B/16': JiT_B_16,
-    'JiT-B/32': JiT_B_32,
-    'JiT-L/16': JiT_L_16,
-    'JiT-L/32': JiT_L_32,
-    'JiT-H/16': JiT_H_16,
-    'JiT-H/32': JiT_H_32,
-    'JiT-B/2-4C': JiT_B_2_4C,
     'JiT-Dual-B/2-4C-896': JiT_Dual_B_2_4C_896,
-    'JiT-B/4-4C': JiT_B_4_4C,
-    'JiT-L/2-4C': JiT_L_2_4C,
-    'JiT-L/4-4C': JiT_L_4_4C,
 }

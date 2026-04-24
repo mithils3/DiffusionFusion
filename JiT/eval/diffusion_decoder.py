@@ -15,6 +15,7 @@ import torch
 import timm
 
 from JiT.decoder import Decoder
+from JiT.eval.utils import images_to_uint8, resolve_strict_state_dict
 
 
 _DEFAULT_IMAGE_MEAN = (0.485, 0.456, 0.406)
@@ -112,33 +113,7 @@ def _resolve_state_dict(
     checkpoint_state: dict,
     model: torch.nn.Module,
 ) -> dict:
-    """Strip common prefixes from a checkpoint state dict to match model keys."""
-    expected_keys = set(model.state_dict().keys())
-
-    if set(checkpoint_state.keys()) == expected_keys:
-        return dict(checkpoint_state)
-
-    candidate = dict(checkpoint_state)
-    for _ in range(4):
-        if set(candidate.keys()) == expected_keys:
-            return candidate
-        if not candidate or any("." not in k for k in candidate):
-            break
-        heads = {k.split(".", 1)[0] for k in candidate}
-        if len(heads) != 1:
-            break
-        candidate = {k.split(".", 1)[1]: v for k, v in candidate.items()}
-
-    for prefix in ("decoder.", "module.decoder.", "_orig_mod.decoder."):
-        filtered = {
-            k[len(prefix):]: v
-            for k, v in checkpoint_state.items()
-            if k.startswith(prefix)
-        }
-        if set(filtered.keys()) == expected_keys:
-            return filtered
-
-    raise RuntimeError("Decoder checkpoint state dict is incompatible with the model.")
+    return resolve_strict_state_dict(checkpoint_state, model, label="Decoder")
 
 
 def decode_with_decoder(
@@ -167,16 +142,12 @@ def _decoder_images_to_uint8(
     images: torch.Tensor,
     decoder: Decoder,
 ) -> np.ndarray:
-    images = images.detach().float().cpu()
     mean = torch.as_tensor(
         getattr(decoder, "_output_mean", _DEFAULT_IMAGE_MEAN),
-        dtype=images.dtype,
+        dtype=torch.float32,
     ).view(1, -1, 1, 1)
     std = torch.as_tensor(
         getattr(decoder, "_output_std", _DEFAULT_IMAGE_STD),
-        dtype=images.dtype,
+        dtype=torch.float32,
     ).view(1, -1, 1, 1)
-    images = images * std + mean
-    images = images.clamp_(0.0, 1.0)
-    images = images.mul(255.0).round().to(torch.uint8)
-    return images.permute(0, 2, 3, 1).numpy()
+    return images_to_uint8(images, mean, std)

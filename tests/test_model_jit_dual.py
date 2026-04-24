@@ -24,6 +24,9 @@ class JiTDualStreamTests(unittest.TestCase):
         self.assertEqual(model.latent_in_context_posemb.shape, (1, 4, 896))
         self.assertEqual(model.dino_in_context_posemb.shape, (1, 4, 896))
 
+    def test_active_registry_only_exposes_dual_training_model(self):
+        self.assertEqual(set(JiT_models), {"JiT-Dual-B/2-4C-896"})
+
     def test_dual_variant_keeps_latent_and_dino_towers_separate(self):
         model = self._build_model()
 

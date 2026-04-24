@@ -97,15 +97,13 @@ class Denoiser(nn.Module):
         labels: torch.Tensor,
         dino_t: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if getattr(self.net, "supports_dino_time", False):
-            return self.net(
-                z_latent,
-                z_dino,
-                t.flatten(),
-                labels,
-                dino_t.flatten() if dino_t is not None else None,
-            )
-        return self.net(z_latent, z_dino, t.flatten(), labels)
+        return self.net(
+            z_latent,
+            z_dino,
+            t.flatten(),
+            labels,
+            dino_t.flatten() if dino_t is not None else None,
+        )
 
     def forward(self, latent: torch.Tensor, dino: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
         labels_dropped = self.drop_labels(labels) if self.training else labels

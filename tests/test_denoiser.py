@@ -13,8 +13,8 @@ class _ConstantPredictor(torch.nn.Module):
         super().__init__()
         self.value = value
 
-    def forward(self, z_latent, z_dino, t, labels):
-        del t, labels
+    def forward(self, z_latent, z_dino, t, labels, dino_t=None):
+        del t, labels, dino_t
         latent = torch.full_like(z_latent, self.value)
         dino = torch.full_like(z_dino, -self.value)
         return latent, dino
@@ -25,8 +25,8 @@ class _FinalStepPredictor(torch.nn.Module):
         super().__init__()
         self.value = value
 
-    def forward(self, z_latent, z_dino, t, labels):
-        del labels
+    def forward(self, z_latent, z_dino, t, labels, dino_t=None):
+        del labels, dino_t
         final_mask = (t > 0.97).view(-1, 1, 1, 1)
         latent = torch.where(final_mask, torch.full_like(z_latent, self.value), z_latent)
         dino = torch.where(final_mask, torch.full_like(z_dino, -self.value), z_dino)

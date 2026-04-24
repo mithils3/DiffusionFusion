@@ -41,6 +41,15 @@ class DiffusionDecoderTests(unittest.TestCase):
         self.assertEqual(mean, (0.1, 0.2, 0.3))
         self.assertEqual(std, (0.4, 0.5, 0.6))
 
+    def test_resolve_state_dict_rejects_prefixed_keys(self):
+        model = torch.nn.Linear(2, 1)
+        exact_state = diffusion_decoder._resolve_state_dict(model.state_dict(), model)
+        self.assertEqual(set(exact_state), set(model.state_dict()))
+
+        prefixed_state = {f"decoder.{key}": value for key, value in model.state_dict().items()}
+        with self.assertRaisesRegex(RuntimeError, "does not match the current model exactly"):
+            diffusion_decoder._resolve_state_dict(prefixed_state, model)
+
 
 if __name__ == "__main__":
     unittest.main()

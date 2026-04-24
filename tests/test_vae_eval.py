@@ -2,6 +2,8 @@ import argparse
 import unittest
 from types import SimpleNamespace
 
+import torch
+
 from JiT.eval import vae_eval as vae_eval_module
 
 
@@ -23,23 +25,37 @@ class VaeEvalHelperTests(unittest.TestCase):
         self.assertEqual(str(resolved), "/tmp/jit-run/checkpoint-last.pth")
 
     def test_load_checkpoint_args_accepts_namespace_payload(self):
-        payload_args = argparse.Namespace(model="JiT-B/2-4C", cfg=2.9)
+        payload_args = argparse.Namespace(model="JiT-Dual-B/2-4C-896", cfg=2.9)
 
         loaded_args = vae_eval_module.load_checkpoint_args({"args": payload_args})
 
         self.assertIsInstance(loaded_args, argparse.Namespace)
-        self.assertEqual(loaded_args.model, "JiT-B/2-4C")
+        self.assertEqual(loaded_args.model, "JiT-Dual-B/2-4C-896")
         self.assertEqual(loaded_args.cfg, 2.9)
         self.assertIsNot(loaded_args, payload_args)
 
     def test_load_checkpoint_args_accepts_dict_payload(self):
         loaded_args = vae_eval_module.load_checkpoint_args(
-            {"args": {"model": "JiT-B/2-4C", "cfg": 2.9}}
+            {"args": {"model": "JiT-Dual-B/2-4C-896", "cfg": 2.9}}
         )
 
         self.assertIsInstance(loaded_args, argparse.Namespace)
-        self.assertEqual(loaded_args.model, "JiT-B/2-4C")
+        self.assertEqual(loaded_args.model, "JiT-Dual-B/2-4C-896")
         self.assertEqual(loaded_args.cfg, 2.9)
+
+    def test_resolve_denoiser_state_dict_requires_exact_keys(self):
+        model = torch.nn.Linear(2, 1)
+        exact_state, stripped_prefix = vae_eval_module.resolve_denoiser_state_dict(
+            model.state_dict(),
+            model,
+        )
+
+        self.assertEqual(set(exact_state), set(model.state_dict()))
+        self.assertIsNone(stripped_prefix)
+
+        prefixed_state = {f"module.{key}": value for key, value in model.state_dict().items()}
+        with self.assertRaisesRegex(RuntimeError, "does not match the current model exactly"):
+            vae_eval_module.resolve_denoiser_state_dict(prefixed_state, model)
 
     def test_select_checkpoint_key_auto_prefers_model_ema1(self):
         args = SimpleNamespace(checkpoint_key="auto")
