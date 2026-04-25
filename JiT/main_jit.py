@@ -23,10 +23,7 @@ from JiT.engine_jit import train_one_epoch, evaluate
 from JiT.denoiser import Denoiser
 from JiT.eval.diffusion_decoder import load_decoder_for_eval
 
-try:
-    import wandb
-except ImportError:
-    wandb = None
+import wandb
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -214,10 +211,7 @@ def init_loggers(args, global_rank):
 
     wandb_run = None
     if global_rank == 0 and args.use_wandb:
-        if wandb is None:
-            raise ImportError(
-                "wandb is not installed. Install it with `pip install wandb` or disable --use_wandb."
-            )
+        
         wandb_run = wandb.init(
             project=args.wandb_project,
             entity=args.wandb_entity,
