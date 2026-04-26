@@ -214,6 +214,7 @@ def heatmap_image(
     *,
     vmax: float | None = None,
     gamma: float = 1.0,
+    resample: Image.Resampling = Image.Resampling.BILINEAR,
 ) -> Image.Image:
     normed = normalize_map(values, vmax=vmax, gamma=gamma)
     colors = _interpolate_colormap(
@@ -229,7 +230,36 @@ def heatmap_image(
             (1.00, (255, 244, 210)),
         ],
     )
-    return Image.fromarray(colors, mode="RGB").resize((size, size), Image.Resampling.NEAREST)
+    return Image.fromarray(colors, mode="RGB").resize((size, size), resample)
+
+
+def overlay_heatmap_on_image(
+    image: Image.Image,
+    values: np.ndarray,
+    *,
+    vmax: float,
+    gamma: float,
+    alpha: float = 0.55,
+) -> Image.Image:
+    size = image.width
+    normed = normalize_map(values, vmax=vmax, gamma=gamma)
+    heatmap = heatmap_image(
+        values,
+        size,
+        vmax=vmax,
+        gamma=gamma,
+        resample=Image.Resampling.BILINEAR,
+    )
+    base = np.asarray(image.convert("RGB"), dtype=np.float32)
+    heat = np.asarray(heatmap, dtype=np.float32)
+    mask = Image.fromarray((normed * 255.0).astype(np.uint8), mode="L").resize(
+        (size, size),
+        Image.Resampling.BILINEAR,
+    )
+    mask_arr = np.asarray(mask, dtype=np.float32) / 255.0
+    alpha_arr = (alpha * mask_arr)[..., None]
+    blended = base * (1.0 - alpha_arr) + heat * alpha_arr
+    return Image.fromarray(np.clip(blended, 0, 255).astype(np.uint8), mode="RGB")
 
 
 def difference_image(values: np.ndarray, size: int, *, percentile: float = 98.0) -> Image.Image:
@@ -307,18 +337,20 @@ def save_figure(
     recon_panel = recon.copy()
     draw_patch_box(recon_panel, row, col, patch_size)
 
-    dino_vmax = robust_vmax(dino_abs, heatmap_percentile)
-    latent_vmax = robust_vmax(latent_abs, heatmap_percentile)
-    dino_panel = heatmap_image(
+    shared_vmax = robust_vmax(
+        np.concatenate([dino_abs.reshape(-1), latent_abs.reshape(-1)]),
+        heatmap_percentile,
+    )
+    dino_panel = overlay_heatmap_on_image(
+        recon,
         dino_abs,
-        image_size,
-        vmax=dino_vmax,
+        vmax=shared_vmax,
         gamma=heatmap_gamma,
     )
-    latent_panel = heatmap_image(
+    latent_panel = overlay_heatmap_on_image(
+        recon,
         latent_abs,
-        image_size,
-        vmax=latent_vmax,
+        vmax=shared_vmax,
         gamma=heatmap_gamma,
     )
     diff_panel = difference_image(
