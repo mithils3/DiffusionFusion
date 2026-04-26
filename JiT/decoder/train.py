@@ -28,8 +28,7 @@ from JiT.decoder.losses import (
 )
 
 def _dist_barrier():
-    if misc.is_dist_avail_and_initialized():
-        torch.distributed.barrier()
+    misc.distributed_barrier()
 
 
 def _autocast_context(device: torch.device):

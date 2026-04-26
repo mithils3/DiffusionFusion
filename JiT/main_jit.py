@@ -476,7 +476,7 @@ def main(args):
 
             # Keep ranks in lockstep after rank-0 checkpoint I/O before eval/next epoch.
             if did_save_checkpoint and args.distributed:
-                torch.distributed.barrier()
+                misc.distributed_barrier()
 
             # Perform online evaluation at specified intervals
             if args.online_eval and (epoch % args.eval_freq == 0 or epoch + 1 == args.epochs):

@@ -187,7 +187,7 @@ def evaluate(model_without_ddp, args, epoch, decoder, batch_size=64, log_writer=
             sampled_latents, sampled_dino = model_without_ddp.generate(
                 labels_gen)
 
-        torch.distributed.barrier()
+        misc.distributed_barrier()
 
         print("Decoding step {}/{}".format(step_idx, num_steps))
         sampled_images = decode_with_decoder(decoder, sampled_latents, sampled_dino)
@@ -209,7 +209,7 @@ def evaluate(model_without_ddp, args, epoch, decoder, batch_size=64, log_writer=
                         sample, caption=f"class={class_id}, idx={index}")
                 )
 
-    torch.distributed.barrier()
+    misc.distributed_barrier()
 
     # back to no ema
     print("Switch back from ema")
@@ -226,7 +226,7 @@ def evaluate(model_without_ddp, args, epoch, decoder, batch_size=64, log_writer=
     if metrics_requested and misc.is_main_process() and os.path.exists(metrics_done_path):
         os.remove(metrics_done_path)
     if metrics_requested:
-        torch.distributed.barrier()
+        misc.distributed_barrier()
 
     if metrics_requested and misc.is_main_process():
         if torch_fidelity is None:
@@ -273,7 +273,7 @@ def evaluate(model_without_ddp, args, epoch, decoder, batch_size=64, log_writer=
                 )
             time.sleep(1.0)
 
-    torch.distributed.barrier()
+    misc.distributed_barrier()
     if misc.is_main_process() and metrics_requested:
         if os.path.isdir(save_folder):
             shutil.rmtree(save_folder)

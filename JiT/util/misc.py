@@ -1,5 +1,6 @@
 import builtins
 import datetime
+import inspect
 import os
 import time
 from collections import defaultdict, deque
@@ -8,6 +9,23 @@ import copy
 
 import torch
 import torch.distributed as dist
+
+
+def distributed_barrier(device_id=None):
+    if not is_dist_avail_and_initialized():
+        return
+
+    barrier_kwargs = {}
+    if torch.cuda.is_available():
+        if device_id is None:
+            device_id = torch.cuda.current_device()
+        barrier_kwargs["device_ids"] = [int(device_id)]
+
+    try:
+        dist.barrier(**barrier_kwargs)
+    except TypeError:
+        # Older PyTorch versions do not accept device_ids.
+        dist.barrier()
 
 
 class SmoothedValue(object):
@@ -36,7 +54,7 @@ class SmoothedValue(object):
             return
         t = torch.tensor([self.count, self.total],
                          dtype=torch.float64, device='cuda')
-        dist.barrier()
+        distributed_barrier()
         dist.all_reduce(t)
         t = t.tolist()
         self.count = int(t[0])
@@ -248,10 +266,17 @@ def init_distributed_mode(args):
     print('| distributed init (rank {}): {}, gpu {}'.format(
         args.rank, args.dist_url, args.gpu), flush=True)
     print('| distributed timeout: {}s'.format(dist_timeout_sec), flush=True)
-    torch.distributed.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
-                                         world_size=args.world_size, rank=args.rank,
-                                         timeout=datetime.timedelta(seconds=dist_timeout_sec))
-    torch.distributed.barrier()
+    init_kwargs = {
+        "backend": args.dist_backend,
+        "init_method": args.dist_url,
+        "world_size": args.world_size,
+        "rank": args.rank,
+        "timeout": datetime.timedelta(seconds=dist_timeout_sec),
+    }
+    if "device_id" in inspect.signature(torch.distributed.init_process_group).parameters:
+        init_kwargs["device_id"] = torch.device("cuda", args.gpu)
+    torch.distributed.init_process_group(**init_kwargs)
+    distributed_barrier(args.gpu)
     setup_for_distributed(args.rank == 0)
 
 
