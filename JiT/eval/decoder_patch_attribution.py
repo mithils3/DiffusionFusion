@@ -108,19 +108,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--heatmap-percentile",
         type=float,
-        default=98.0,
+        default=100.0,
         help=(
-            "Percentile used to scale attribution heatmaps for display. Lower values "
-            "increase contrast for weak signals. Defaults to 98."
+            "Percentile used to scale attribution heatmaps for display. Defaults to "
+            "100, which is plain min/max scaling per saved figure."
         ),
     )
     parser.add_argument(
         "--heatmap-gamma",
         type=float,
-        default=0.65,
+        default=1.0,
         help=(
             "Gamma applied after heatmap normalization. Values below 1 brighten "
-            "low attribution values. Defaults to 0.65."
+            "low attribution values. Defaults to 1 for linear scaling."
         ),
     )
     parser.add_argument(
@@ -233,35 +233,6 @@ def heatmap_image(
     return Image.fromarray(colors, mode="RGB").resize((size, size), resample)
 
 
-def overlay_heatmap_on_image(
-    image: Image.Image,
-    values: np.ndarray,
-    *,
-    vmax: float,
-    gamma: float,
-    alpha: float = 0.55,
-) -> Image.Image:
-    size = image.width
-    normed = normalize_map(values, vmax=vmax, gamma=gamma)
-    heatmap = heatmap_image(
-        values,
-        size,
-        vmax=vmax,
-        gamma=gamma,
-        resample=Image.Resampling.BILINEAR,
-    )
-    base = np.asarray(image.convert("RGB"), dtype=np.float32)
-    heat = np.asarray(heatmap, dtype=np.float32)
-    mask = Image.fromarray((normed * 255.0).astype(np.uint8), mode="L").resize(
-        (size, size),
-        Image.Resampling.BILINEAR,
-    )
-    mask_arr = np.asarray(mask, dtype=np.float32) / 255.0
-    alpha_arr = (alpha * mask_arr)[..., None]
-    blended = base * (1.0 - alpha_arr) + heat * alpha_arr
-    return Image.fromarray(np.clip(blended, 0, 255).astype(np.uint8), mode="RGB")
-
-
 def difference_image(values: np.ndarray, size: int, *, percentile: float = 98.0) -> Image.Image:
     arr = np.asarray(values, dtype=np.float32)
     arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
@@ -341,17 +312,19 @@ def save_figure(
         np.concatenate([dino_abs.reshape(-1), latent_abs.reshape(-1)]),
         heatmap_percentile,
     )
-    dino_panel = overlay_heatmap_on_image(
-        recon,
+    dino_panel = heatmap_image(
         dino_abs,
+        image_size,
         vmax=shared_vmax,
         gamma=heatmap_gamma,
+        resample=Image.Resampling.NEAREST,
     )
-    latent_panel = overlay_heatmap_on_image(
-        recon,
+    latent_panel = heatmap_image(
         latent_abs,
+        image_size,
         vmax=shared_vmax,
         gamma=heatmap_gamma,
+        resample=Image.Resampling.NEAREST,
     )
     diff_panel = difference_image(
         latent_abs - dino_abs,
@@ -365,8 +338,8 @@ def save_figure(
 
     panels = [
         label_panel(recon_panel, "decoded image"),
-        label_panel(dino_panel, "DINO abs attribution"),
-        label_panel(latent_panel, "latent abs attribution"),
+        label_panel(dino_panel, f"DINO abs | max {shared_vmax:.2e}"),
+        label_panel(latent_panel, "latent abs | same scale"),
         label_panel(diff_panel, "latent abs - DINO abs"),
     ]
     gap = 8
