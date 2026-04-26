@@ -106,6 +106,24 @@ def parse_args() -> argparse.Namespace:
         help="Save raw signed and absolute attribution maps beside each figure.",
     )
     parser.add_argument(
+        "--heatmap-percentile",
+        type=float,
+        default=98.0,
+        help=(
+            "Percentile used to scale attribution heatmaps for display. Lower values "
+            "increase contrast for weak signals. Defaults to 98."
+        ),
+    )
+    parser.add_argument(
+        "--heatmap-gamma",
+        type=float,
+        default=0.65,
+        help=(
+            "Gamma applied after heatmap normalization. Values below 1 brighten "
+            "low attribution values. Defaults to 0.65."
+        ),
+    )
+    parser.add_argument(
         "--upload-to-hf",
         action="store_true",
         help="Upload the output directory to Hugging Face after generation.",
@@ -142,14 +160,32 @@ def tensor_to_uint8_image(
     return Image.fromarray(array, mode="RGB")
 
 
-def normalize_map(values: np.ndarray, vmax: float | None = None) -> np.ndarray:
+def robust_vmax(values: np.ndarray, percentile: float) -> float:
+    arr = np.asarray(values, dtype=np.float32)
+    arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+    positive = arr[arr > 0.0]
+    if positive.size == 0:
+        return 0.0
+    pct = float(np.clip(percentile, 0.0, 100.0))
+    return float(max(np.percentile(positive, pct), positive.max() * 1.0e-6))
+
+
+def normalize_map(
+    values: np.ndarray,
+    vmax: float | None = None,
+    *,
+    gamma: float = 1.0,
+) -> np.ndarray:
     arr = np.asarray(values, dtype=np.float32)
     arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
     if vmax is None:
         vmax = float(arr.max()) if arr.size else 0.0
     if vmax <= 0.0:
         return np.zeros_like(arr, dtype=np.float32)
-    return np.clip(arr / vmax, 0.0, 1.0)
+    normed = np.clip(arr / vmax, 0.0, 1.0)
+    if gamma > 0.0 and gamma != 1.0:
+        normed = np.power(normed, gamma)
+    return normed
 
 
 def _interpolate_colormap(x: np.ndarray, stops: list[tuple[float, tuple[int, int, int]]]) -> np.ndarray:
@@ -172,25 +208,38 @@ def _interpolate_colormap(x: np.ndarray, stops: list[tuple[float, tuple[int, int
     return np.clip(out, 0, 255).astype(np.uint8)
 
 
-def heatmap_image(values: np.ndarray, size: int, *, vmax: float | None = None) -> Image.Image:
-    normed = normalize_map(values, vmax=vmax)
+def heatmap_image(
+    values: np.ndarray,
+    size: int,
+    *,
+    vmax: float | None = None,
+    gamma: float = 1.0,
+) -> Image.Image:
+    normed = normalize_map(values, vmax=vmax, gamma=gamma)
     colors = _interpolate_colormap(
         normed,
         [
-            (0.00, (8, 8, 24)),
-            (0.30, (64, 20, 115)),
-            (0.60, (210, 72, 66)),
-            (0.82, (252, 175, 70)),
-            (1.00, (255, 246, 180)),
+            (0.00, (5, 8, 22)),
+            (0.12, (26, 31, 89)),
+            (0.28, (26, 93, 170)),
+            (0.45, (28, 159, 142)),
+            (0.62, (115, 203, 82)),
+            (0.78, (244, 201, 58)),
+            (0.92, (238, 92, 52)),
+            (1.00, (255, 244, 210)),
         ],
     )
     return Image.fromarray(colors, mode="RGB").resize((size, size), Image.Resampling.NEAREST)
 
 
-def difference_image(values: np.ndarray, size: int) -> Image.Image:
+def difference_image(values: np.ndarray, size: int, *, percentile: float = 98.0) -> Image.Image:
     arr = np.asarray(values, dtype=np.float32)
     arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
-    scale = float(np.abs(arr).max()) if arr.size else 0.0
+    abs_values = np.abs(arr)
+    positive = abs_values[abs_values > 0.0]
+    scale = float(np.percentile(positive, np.clip(percentile, 0.0, 100.0))) if positive.size else 0.0
+    if positive.size:
+        scale = max(scale, float(positive.max()) * 1.0e-6)
     if scale <= 0.0:
         normed = np.full_like(arr, 0.5, dtype=np.float32)
     else:
@@ -229,15 +278,15 @@ def draw_patch_box(
 
 
 def label_panel(image: Image.Image, title: str) -> Image.Image:
-    title_h = 34
+    title_h = 28
     panel = Image.new("RGB", (image.width, image.height + title_h), "white")
     panel.paste(image, (0, title_h))
     draw = ImageDraw.Draw(panel)
     try:
-        font = ImageFont.truetype("DejaVuSans.ttf", 16)
+        font = ImageFont.truetype("DejaVuSans.ttf", 15)
     except OSError:
         font = ImageFont.load_default()
-    draw.text((8, 8), title, fill=(24, 24, 24), font=font)
+    draw.text((7, 6), title, fill=(24, 24, 24), font=font)
     return panel
 
 
@@ -251,15 +300,32 @@ def save_figure(
     col: int,
     patch_size: int,
     grid_size: int,
+    heatmap_percentile: float = 98.0,
+    heatmap_gamma: float = 0.65,
 ) -> None:
     image_size = recon.width
     recon_panel = recon.copy()
     draw_patch_box(recon_panel, row, col, patch_size)
 
-    shared_vmax = max(float(dino_abs.max()), float(latent_abs.max()), 1.0e-12)
-    dino_panel = heatmap_image(dino_abs, image_size, vmax=shared_vmax)
-    latent_panel = heatmap_image(latent_abs, image_size, vmax=shared_vmax)
-    diff_panel = difference_image(latent_abs - dino_abs, image_size)
+    dino_vmax = robust_vmax(dino_abs, heatmap_percentile)
+    latent_vmax = robust_vmax(latent_abs, heatmap_percentile)
+    dino_panel = heatmap_image(
+        dino_abs,
+        image_size,
+        vmax=dino_vmax,
+        gamma=heatmap_gamma,
+    )
+    latent_panel = heatmap_image(
+        latent_abs,
+        image_size,
+        vmax=latent_vmax,
+        gamma=heatmap_gamma,
+    )
+    diff_panel = difference_image(
+        latent_abs - dino_abs,
+        image_size,
+        percentile=heatmap_percentile,
+    )
 
     heat_patch = max(image_size // grid_size, 1)
     for panel in (dino_panel, latent_panel, diff_panel):
@@ -271,16 +337,16 @@ def save_figure(
         label_panel(latent_panel, "latent abs attribution"),
         label_panel(diff_panel, "latent abs - DINO abs"),
     ]
-    gap = 12
+    gap = 8
     canvas = Image.new(
         "RGB",
-        (sum(panel.width for panel in panels) + gap * (len(panels) - 1), panels[0].height),
+        (panels[0].width * 2 + gap, panels[0].height * 2 + gap),
         "white",
     )
-    x = 0
-    for panel in panels:
-        canvas.paste(panel, (x, 0))
-        x += panel.width + gap
+    for idx, panel in enumerate(panels):
+        x = (idx % 2) * (panel.width + gap)
+        y = (idx // 2) * (panel.height + gap)
+        canvas.paste(panel, (x, y))
     canvas.save(path, format="PNG", compress_level=3)
 
 
@@ -587,6 +653,8 @@ def main() -> None:
                         col=col,
                         patch_size=decoder.patch_size,
                         grid_size=int(decoder.num_patches**0.5),
+                        heatmap_percentile=args.heatmap_percentile,
+                        heatmap_gamma=args.heatmap_gamma,
                     )
 
                     metrics = attribution_metrics(
