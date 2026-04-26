@@ -1,222 +1,286 @@
-# Custom Dual JiT: path from ~8 FID-50K to ~5 FID-50K at 80 epochs
+# V-Co-guided improvement plan for JiT dual noising
 
-Date: 2026-04-23
+Date: 2026-04-25
 
-## Current repo read
+Goal: use V-Co as the main reference for improving the current `JiT-Dual-B/2-4C-896` run, which is around 8 FID after 80 epochs. The useful framing from V-Co is that co-denoising quality depends on four separable choices:
 
-- Training script: `sbatch/jit_training.sbatch`
-  - Model: `JiT-Dual-B/2-4C-896`
-  - Epoch budget: 80
-  - Effective batch size: `128 * accum_iter 2 * 4 GPUs = 1024`
-  - LR: `blr=5e-5`, so actual LR should be `2e-4`
-  - Schedule: default run name says constant, and `LR_SCHEDULE=constant`
-  - Sampling/eval: Heun, 50 steps, CFG `2.9`, interval `[0.1, 1.0]`
-  - Eval currently defaults to `NUM_IMAGES=10000`, so final FID claims must still be rerun at 50K.
+1. Architecture
+2. CFG / unconditional branch definition
+3. Auxiliary semantic loss
+4. Cross-stream calibration
 
-- Model code: `JiT/model_jit.py`
-  - Baseline shared-trunk `JiT-B/2-4C` has about 235M trainable params.
-  - Custom dual stream `JiT-Dual-B/2-4C-896` has about 376M trainable params.
-  - `JiT-L/2-4C` has about 462M trainable params.
-  - Dual stream separates latent and DINO towers, adds context at block 0, and fuses bidirectionally at blocks 4 and 8.
-  - Dual model supports separate DINO time conditioning through `supports_dino_time=True`.
+This repo already has a latent+DINO dual noising system, so the plan is not a ground-up rewrite. The priority is to make our existing setup closer to the parts of V-Co that had the largest controlled ablation gains.
 
-- Denoiser code: `JiT/denoiser.py`
-  - Training samples a single latent time `t = sigmoid(N(P_mean, P_std))`, currently `P_mean=-0.8`, `P_std=0.8`.
-  - DINO time is then shifted in logit space by `log(sqrt(dino_dim / latent_dim))`.
-  - With DINO `[768,16,16]` and SD-VAE latent `[4,32,32]`, `sqrt(196608 / 4096) = sqrt(48) = 6.93`, so `t=0.5` maps to `dino_t~=0.874`.
-  - The latent branch itself still uses the old JiT/SD-VAE schedule, not a dimension-aware schedule.
-  - Loss is equal-weighted latent velocity MSE + DINO velocity MSE.
+## Current repo baseline
 
-- Feature/decoder code:
-  - DINO features are per-token layer-normalized during extraction.
-  - SDXL-VAE latents are not dataset-normalized beyond VAE scaling factor.
-  - Decoder has RAE-style noise augmentation (`decoder_noise_tau`, default config says `0.2`; earlier dataclass default is `0.4`, so check the actual checkpoint args).
-  - The decoder rFID in `JiT/decoder/RESULTS.md` is strong enough that the denoiser/sampler is the likely bottleneck, not reconstruction.
+- Model: `JiT-Dual-B/2-4C-896`
+- Training budget: 80 epochs
+- Effective batch size: `128 * accum_iter 2 * 4 GPUs = 1024`
+- LR: `blr=5e-5`, expected actual LR `2e-4`
+- Sampling/eval: Heun, 50 steps, CFG `2.9`, interval `[0.1, 1.0]`
+- Current architecture: separate latent and DINO towers, in-context tokens at block 0, bidirectional cross-fusion at blocks 4 and 8.
+- Current noising: latent time `t = sigmoid(N(P_mean=-0.8, P_std=0.8))`; DINO time is shifted by `log(sqrt(dino_dim / latent_dim))`.
+- Current loss: equal latent velocity MSE and DINO velocity MSE by default.
+- Current CFG: unconditional pass replaces class label with the null class, but still passes the same noised DINO stream through the model.
 
-## Literature signal
+Important caveat: V-Co is pixel+DINO. This repo is SD-VAE latent+DINO+decoder. So copy the principles, not the exact numbers.
 
-- RAE / DiT with Representation Autoencoders says high-dimensional representation latents need three things: transformer width at least comparable to token dimension, dimension-dependent noise/time shift, and noise-augmented decoder training. Their project page reports standard DiT-XL on DINOv2-B RAE latents at 4.28 gFID after 80 epochs, and DiT-DH-XL at 2.16 after 80 epochs. Sources: arXiv 2510.11690 and project page.
-  - https://arxiv.org/abs/2510.11690
-  - https://rae-dit.github.io/
+## V-Co match map
 
-- The RAE schedule shift formula is:
-  - `t_m = alpha * t_n / (1 + (alpha - 1) * t_n)`
-  - `alpha = sqrt(m / n)`, with base `n=4096`
-  - This is already conceptually in our DINO shift, but only as `dino_t = sigmoid(logit(t) + log(alpha))`.
-  - For the combined dual target, the effective dimension is `m = latent_dim + dino_dim = 4096 + 196608 = 200704`, so `alpha = sqrt(49) ~= 7.0`.
+### What already matches
 
-- Latent Forcing is very relevant because our model is already a latent+image/latent dual denoiser. LF finds that ordering matters: denoise the semantic latent first, then use it as a scratchpad for the pixel/image stream. Their conditional 80-epoch FID-50K table: JiT 5.64 guided, JiT+REPA 4.57, LF-DiT DINOv2 4.18. Source:
-  - https://arxiv.org/abs/2602.11401
+- Joint denoising of an image-side stream and DINO features.
+- Clean-target prediction converted into velocity loss.
+- Separate latent/DINO processing paths.
+- Separate DINO time conditioning, which is related to V-Co's SNR schedule-shift view.
+- A decoder good enough that the denoiser/sampler is probably the main bottleneck.
 
-- REPA is still useful for fast convergence in latent DiT, but for JiT-like high-dimensional prediction it is risky as a direct add-on. The March 2026 PixelREPA paper reports vanilla REPA can hurt JiT late in training through diversity collapse, while masked/adapter-constrained PixelREPA improves JiT-B/16 FID from 3.66 to 3.17. Source:
-  - https://arxiv.org/abs/2603.14366
+### What does not match yet
 
-## Highest-probability path to 5 FID
+- V-Co's best model lets streams interact every block through joint attention with separate norm/MLP/QKV. Our model has local towers and periodic cross-attention.
+- V-Co defines CFG's unconditional branch structurally by masking semantic-to-pixel attention. Our unconditional branch still lets the latent stream read DINO.
+- V-Co's semantic loss weight is small, around `lambda_d = 0.1`. Our default DINO loss weight is `1.0`.
+- V-Co calibrates by empirical RMS feature scaling. Our current DINO shift is dimension-based and may not match actual latent/DINO signal magnitudes.
+- V-Co's auxiliary gain comes from perceptual/drifting losses on predicted images; our latent+DINO setup needs an adapted version because image decoding during training is expensive.
 
-### 1. First evaluate the current time-shift run correctly
+## Priority 1: structural CFG masking
 
-The recent DINO time-shift change may already recover a lot. Do not compare the old 8 FID against 10K or a stale CFG.
+This is the highest-leverage V-Co transplant.
 
-Run:
+### Why
 
-- Final eval at 50K images, not 10K.
-- Sweep both checkpoint EMAs (`model_ema1`, `model_ema2`) if supported by eval.
-- Sweep CFG wider than current bounds.
+CFG uses:
 
-Concrete sweep:
+`guidance = pred_cond - pred_uncond`
 
-- `CFG_VALUES="2.5,2.9,3.3,3.7,4.1,4.5,5.0,5.5,6.0,7.0,8.0,10.0"`
-- `INTERVAL_MIN` in `{0.05, 0.10, 0.12, 0.15, 0.20}`
-- `INTERVAL_MAX=1.0`
-- Keep Heun 50 first, then only test 75/100 steps on the best 2 configs.
+For this to mean "add class/semantic conditioning", `pred_uncond` must actually be unconditional for the image-side stream.
 
-Why: LightningDiT/RAE-style high-dimensional latents often need much higher CFG than SD-VAE latents, especially with CFG interval. The repo sweep currently caps at `4.5`, which may be leaving easy FID on the table.
+Right now:
 
-Expected impact: possible immediate 8 -> 5-6 if time shift helped and CFG was under-tuned.
+- `latent_cond` sees class label + DINO.
+- `latent_uncond` sees null class + DINO.
+- The latent stream can read DINO through `latent_from_dino` cross-fusion in both passes.
 
-### 2. Add proper global timestep shift, not only DINO-relative time shift
+So `latent_uncond` is still semantically conditioned. The CFG delta mostly captures class-label change, while DINO semantics are partially canceled or muddled. V-Co's result says this is a bad unconditional branch for co-denoising.
 
-Current code samples latent `t` from the old `P_mean=-0.8/P_std=0.8`, then shifts DINO forward. This creates an ordered trajectory, but the global schedule is still calibrated for 4096-dim SD-VAE latents.
+V-Co's controlled CFG ablation on ImageNet-256 with JiT-B/16 at 200 epochs:
 
-Add CLI args:
+- Input-dropout unconditional baselines were around `FID 6.69` guided.
+- Independent dropout plus semantic-to-pixel structural masking reached `FID 3.59` guided.
+- Joint class+DINO dropout plus semantic-to-pixel structural masking reached `FID 3.18` guided.
+- Joint dropout with bidirectional masking was worse at `FID 5.66` guided.
 
-- `--time_shift`
-- `--time_shift_base_dim 4096`
-- `--time_shift_target_dim auto|latent|dino|combined`
+So the best structural masking setup improved guided FID by about `3.51` absolute over the input-dropout baseline, roughly a `52%` relative reduction from `6.69` to `3.18`. The one-way mask mattered: blocking only semantic-to-pixel was much better than blocking both directions.
 
-Implement:
+For our repo, the equivalent of V-Co's semantic-to-pixel mask is DINO-to-latent masking:
 
-- Sample base `t_base = sigmoid(N(P_mean, P_std))`.
-- Shift latent time too:
-  - `t = shift_time(t_base, alpha_latent)` where `alpha_latent` is usually 1.0 for SD-VAE latents.
-  - For dual generation, test `alpha_global = sqrt((latent_dim + dino_dim) / 4096) ~= 7.0`.
-- Derive DINO time either from that global `t` or from `t_base`; test both.
+- During unconditional prediction, disable `latent_from_dino`.
+- Keep `dino_from_latent` active.
 
-Candidate schedules:
+Keeping latent-to-DINO flow matters because the DINO stream can still stay aligned with the image-side trajectory, while the image-side latent prediction is prevented from reading semantic DINO information.
 
-- A: current repo: `latent_t=t_base`, `dino_t=shift(t_base, alpha_dino)`.
-- B: RAE-combined: `latent_t=shift(t_base, alpha_combined)`, `dino_t=latent_t`.
-- C: LF-style ordered: `latent_t=t_base`, `dino_t=shift(t_base, alpha_dino)`, but train with `dino_loss_weight > latent_loss_weight` early.
-- D: cascaded-ish: sample either DINO step or latent step; when training DINO, set latent noisy/full-noise and latent loss 0; when training latent, keep DINO clean or lightly noised.
+### Implementation
 
-Expected impact: high. RAE reports schedule shift as the difference between failure-ish FID and ~4.8 before decoder noise augmentation. Our current DINO shift is close, but not the same as shifting the actual global corruption distribution.
+Add a structural mask path:
 
-### 3. Move architecture closer to RAE-DH or Latent Forcing
+- Add `mask_dino_to_latent: bool = False` to `CrossFusionBlock.forward`.
+- If true, skip `self.latent_from_dino(...)` and leave `latent = latent_snapshot`.
+- Keep `self.dino_from_latent(...)` active.
+- Thread the flag through `JiTDualStream.forward`.
+- Thread the flag through `Denoiser._net_forward`.
+- In `_forward_sample_xpred`, call the unconditional network pass with `mask_dino_to_latent=True`.
 
-Current dual-stream is powerful, but it doubles most trunk compute and keeps only two cross-fusion layers. Two better variants are worth implementing:
+Training should match inference:
 
-Variant A: Additive-token LF model
+- When labels are dropped for CFG training, jointly activate the DINO-to-latent mask.
+- First implementation can be batch-level dropout for simplicity.
+- Better implementation can support per-sample masks by running conditional and masked subsets separately and stitching outputs back.
 
-- Embed latent tokens and DINO tokens separately.
-- Add them into one 256-token sequence instead of keeping 512+context tokens.
-- Use two time embeddings, one for latent, one for DINO.
-- Add two output heads.
-- Optionally split the last 4 blocks into two output experts as LF tried.
+Retraining note:
 
-Why: Latent Forcing gets the multi-tokenizer benefit without doubling sequence length. Their paper says minimal architecture changes and ordering are the main win.
+- Inference-only masking on an existing checkpoint is worth a quick test because it is cheap.
+- But the real V-Co result requires training with the same structural unconditional branch. If the model was only trained with label dropout, the masked unconditional path is out-of-distribution at sampling time.
+- Best practical path: implement inference masking first for a sanity sweep, then run either a finetune or a fresh short pilot with joint label/mask dropout.
 
-Variant B: Wide shallow DINO head
+### Pilot experiment
 
-- Keep current 896-wide dual trunk.
-- Add a 2-layer, 2048-wide DINO/dual denoising head after the trunk, similar to RAE DiT-DH.
-- Let the main trunk stay moderate width, while the head handles high-dimensional DINO token denoising.
+Train a short run with:
 
-Why: RAE says width should match token dimension; our 896 hidden size exceeds DINOv2-B token dim 768, so the core passes the basic threshold, but the final DINO projection is still a single linear head from 896 to 768. A shallow wide head is exactly the RAE trick that improves 4.28 -> 2.16 at 80 epochs.
+- Structural unconditional masking enabled.
+- Joint class/mask dropout probability `0.1`.
+- Same schedule and loss weights as current baseline.
 
-Expected impact: medium-high, but needs a full 80-epoch rerun.
+Evaluate:
 
-### 4. Tune dual loss weighting
+- 10K FID for fast signal.
+- Then 50K FID for the best setting.
+- CFG sweep: `1.5, 2.0, 2.5, 2.9, 3.3, 3.7, 4.1, 4.5, 5.0`.
+- Interval min sweep: `0.05, 0.1, 0.15, 0.2`.
 
-Equal `latent_loss_weight=1.0` and `dino_loss_weight=1.0` may not be optimal. DINO has 48x more scalar dimensions, but because each loss uses `.mean()`, both branches have equal aggregate weight, not equal per-scalar or equal usefulness.
+Expected result: cleaner CFG direction, better guided FID, and less dependence on very high CFG.
 
-Grid:
+## Priority 2: DINO loss weight sweep
 
-- `dino_loss_weight`: `0.25, 0.5, 1.0, 2.0`
-- `latent_loss_weight`: keep `1.0`
+V-Co found the semantic stream helps most when it is secondary to the image/pixel stream. Their best `lambda_d` region is around `0.01` to `0.1`, with `0.1` used in the final recipe.
 
-Watch:
+Our current default is:
 
-- DINO branch train loss
-- latent branch train loss
-- final decoder sample quality
+- `latent_loss_weight = 1.0`
+- `dino_loss_weight = 1.0`
 
-Hypothesis: if generated DINO is acting as decoder semantic control, undertraining it hurts FID more than overtraining it. But if DINO loss steals capacity from the SD-VAE latent, FID will worsen. This is cheap to determine with 10-20 epoch pilots.
+Because each loss is averaged independently, this gives the DINO task equal aggregate weight, not a small auxiliary role.
 
-### 5. Add training-time DINO noise during latent/pixel steps
+### Sweep
 
-Latent Forcing found that small training-time latent noise during pixel steps prevents overfitting/cascaded error, but inference noise is harmful.
+Keep `latent_loss_weight=1.0`, test:
 
-Repo translation:
+- `dino_loss_weight=0.05`
+- `dino_loss_weight=0.1`
+- `dino_loss_weight=0.25`
+- `dino_loss_weight=0.5`
+- `dino_loss_weight=1.0`
 
-- Add `--dino_condition_noise_max`.
-- During latent reconstruction-heavy steps, keep `dino_t` slightly below 1 or add explicit feature noise to DINO conditioning.
-- Do not add this noise at inference.
+Run these after structural CFG masking is in place, because the best loss balance may change once CFG is fixed.
 
-Candidate:
+Expected result: lower DINO weights may improve image latent quality and guided FID, even if DINO reconstruction metrics worsen slightly.
 
-- `dino_condition_noise_max=0.10` and `0.25`
-- Only apply when `t > 0.5` or on a randomly selected 10-25% of batches.
+## Priority 3: empirical RMS calibration
 
-Expected impact: medium, especially if samples look semantically right but have decoder artifacts or brittle details.
+V-Co's calibration result is very relevant. They show that pixels and DINO features need matched signal magnitude, otherwise the same timestep creates mismatched SNR.
 
-### 6. Normalize SD-VAE latents or at least measure their stats
+Current repo uses a dimension-ratio DINO time shift:
 
-DINO tokens are layer-normalized. SD-VAE latents are not normalized beyond `vae.config.scaling_factor`. This mismatch means a single `noise_scale=1.0` and shared loss scale may not match both streams.
+`alpha = sqrt(dino_dim / latent_dim)`
 
-Add a small stats script over the latent shards:
+This is principled for high-dimensional representation latents, but it does not verify actual signal RMS. In this repo:
 
-- global mean/std for SD-VAE latents
-- per-channel mean/std
-- DINO mean/std after token LN
+- DINO features are per-token layer-normalized during extraction.
+- SD-VAE latents are not clearly dataset-normalized beyond VAE scaling.
+- The decoder may expect a particular latent scale.
 
-If latent std is far from 1, add optional dataset normalization metadata and inverse it before decoder, or set `noise_scale`/time shift to match actual latent variance.
+So we should measure before guessing.
 
-Expected impact: low-medium, but it derisks all schedule work.
+### Measurement
 
-### 7. Do not make plain REPA the main bet
+Add a stats pass over training shards:
 
-Plain REPA is tempting, but PixelREPA warns it can fail for JiT as training proceeds. If adding representation alignment, use a constrained version:
+- SD-VAE latent global RMS.
+- SD-VAE latent per-channel mean/std/RMS.
+- DINO global RMS after current feature preprocessing.
+- DINO per-channel/token RMS summary.
 
-- shallow adapter
-- partial token masking
-- stop-gradient DINO target
-- turn off or decay alignment late
-- track per-class diversity/recall, not just early FID
+Compute:
 
-Since this repo already directly denoises DINO features, REPA is also less conceptually necessary than in a pure SD-VAE model.
+`alpha_rms = rms_latent / rms_dino`
 
-## Concrete implementation queue
+### Experiments
 
-1. Eval/sweep current checkpoint:
-   - 50K FID
-   - wider CFG up to 10
-   - interval min sweep
-   - EMA1 vs EMA2
+Compare:
 
-2. Add schedule-shift controls in `JiT/denoiser.py` and args in `JiT/main_jit.py`:
-   - reusable `shift_time(t, alpha)`
-   - `latent_time(t_base)`
-   - `dino_time(t_base)` with selectable modes
-   - tests matching RAE formula and endpoint behavior
+- Current dimension-based DINO time shift.
+- No DINO time shift, but DINO features scaled by `alpha_rms`.
+- DINO time shift derived from empirical RMS instead of dimension ratio.
+- Combined latent+DINO effective shift only if the above two do not help.
 
-3. Add `--dino_loss_weight`/`--latent_loss_weight` to sbatch sweeps if not already surfaced in the training script.
+Expected result: better schedule calibration and less branch imbalance. This is probably lower immediate impact than CFG masking, but it derisks every longer run.
 
-4. Add a `jit_time_schedule_sweep.sbatch` for 10-20 epoch pilots:
-   - current
-   - combined shift
-   - stronger DINO shift
-   - reduced/increased DINO loss
+## Priority 4: architecture closer to V-Co
 
-5. If current-shift + CFG sweep is still above 6 FID, implement the LF additive-token variant. It is probably the most repo-compatible architectural change.
+V-Co's architectural lesson is not "just add another stream"; it is:
 
-6. If LF-style schedule works but plateaus above 5, implement the RAE-DH wide shallow head.
+- Keep feature-specific computation.
+- Let streams interact flexibly.
+- Avoid forcing everything through a mostly shared backbone.
 
-## My best bet
+Our model keeps feature-specific computation, but interaction is sparse: cross-fusion happens periodically rather than every block.
 
-For this exact repo, the fastest route to ~5 FID-50K without increasing epochs is:
+### Low-risk architecture pilots
 
-1. Evaluate the untested time-shift checkpoint with a much wider CFG/interval sweep.
-2. If it is not already near 5, add RAE-style global timestep shift controls and test combined effective dimension.
-3. If a full retrain is allowed, switch the dual architecture toward Latent Forcing ordering: DINO semantics denoise earlier and condition the image/latent branch, with either additive 256-token fusion or stronger late output experts.
+Expose model variants:
 
-The current dual-stream model has enough parameter count and width. The likely missing pieces are schedule/order calibration and sampler guidance, not simply more epochs.
+- `cross_start=0, cross_every=2`
+- `cross_start=0, cross_every=1`
+- optionally unidirectional ablation where DINO-to-latent is available only in conditional paths and latent-to-DINO is always available.
+
+Memory permitting, `cross_every=1` is the closest current-code approximation to V-Co's every-block interaction.
+
+### Larger architecture change
+
+If sparse cross-fusion remains a bottleneck, implement a V-Co-style block:
+
+- Separate latent norm/MLP/QKV.
+- Separate DINO norm/MLP/QKV.
+- Joint attention over both streams every block.
+- Attention mask support for DINO-to-latent during unconditional passes.
+
+This is the clean architectural target, but it is a bigger implementation than structural CFG masking.
+
+Expected result: better semantic transfer across the whole denoising path. This probably requires a full retrain to judge.
+
+## Priority 5: auxiliary semantic objective
+
+V-Co found:
+
+- REPA on hidden states gives little once co-denoising already exists.
+- Perceptual DINO loss on predicted images helps more.
+- Perceptual + drifting hybrid helps best.
+
+For this repo, direct image-space perceptual loss requires decoding predicted latents during training, which is expensive and may complicate gradients through the decoder.
+
+### Practical staged version
+
+Start simple:
+
+- Do not add plain REPA as the first bet.
+- First try a DINO-space consistency loss on the predicted DINO clean output, if it is not redundant with the v-loss.
+- Then try a batch-level same-class repulsion term on predicted DINO features, adapted from V-Co's drifting loss.
+
+Hybrid sketch:
+
+- Positive field: pull predicted DINO clean feature toward the target DINO feature.
+- Negative field: repel predicted DINO clean feature from same-class generated/predicted neighbors in the batch.
+- Gate: use similarity to the target DINO feature, so repulsion dominates when far and attraction dominates when close.
+
+This is cheaper than image decoding and follows the spirit of V-Co, but it is not identical to their image perceptual loss.
+
+Expected result: possible diversity/precision improvement after CFG and calibration are fixed. Do this later because bad CFG can hide the effect of auxiliary losses.
+
+## Evaluation discipline
+
+Do not compare stale 10K FID against paper-style 50K FID.
+
+For each serious candidate:
+
+- Run quick 10K FID for direction.
+- Confirm best candidates at 50K FID.
+- Sweep CFG and CFG interval.
+- Track both EMA settings if checkpoints support it.
+- Record exact checkpoint, epoch, CFG, interval, steps, EMA, and sample count.
+
+Default sweep:
+
+- CFG: `1.5, 2.0, 2.5, 2.9, 3.3, 3.7, 4.1, 4.5, 5.0`
+- Interval min: `0.05, 0.10, 0.15, 0.20`
+- Interval max: `1.0`
+- Steps: Heun 50 first; test 75/100 only for the top two configurations.
+
+## Ordered implementation queue
+
+1. Implement structural DINO-to-latent masking for unconditional CFG.
+2. Add joint label/mask dropout during training.
+3. Run short pilot and CFG sweep against the current baseline.
+4. Sweep `dino_loss_weight` around V-Co's `lambda_d` regime.
+5. Add latent/DINO RMS stats and test empirical calibration.
+6. Test denser cross-fusion variants.
+7. Only after the above, adapt V-Co's perceptual-drifting hybrid loss in DINO space.
+
+## Best bet
+
+The fastest path down from 8 FID is probably not more parameters or plain REPA. It is:
+
+1. Make CFG structurally unconditional by masking DINO-to-latent in the unconditional branch.
+2. Train with the same joint mask/dropout behavior used at inference.
+3. Reduce the DINO loss weight toward V-Co's semantic auxiliary regime.
+4. Calibrate latent and DINO signal magnitudes empirically.
+
+This is the closest clean extension of V-Co's controlled findings to our current JiT dual noising code.
