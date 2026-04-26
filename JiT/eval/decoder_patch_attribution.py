@@ -113,8 +113,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--hf-repo-id",
         type=str,
-        default="Mithilss",
-        help="Hugging Face repo id used with --upload-to-hf.",
+        default="Mithilss/decoder_patch_attribution",
+        help=(
+            "Hugging Face repo id used with --upload-to-hf. A bare namespace "
+            "like `Mithilss` is expanded to `Mithilss/decoder_patch_attribution`."
+        ),
     )
     parser.add_argument(
         "--hf-repo-type",
@@ -421,7 +424,7 @@ def iter_requested_patches(
     return [select_visible_patch(image[0].detach().cpu(), patch_size)]
 
 
-def upload_to_huggingface(args: argparse.Namespace, output_dir: Path) -> None:
+def upload_to_huggingface(args: argparse.Namespace, output_dir: Path) -> tuple[str, str]:
     try:
         from huggingface_hub import HfApi
     except ImportError as exc:
@@ -429,18 +432,32 @@ def upload_to_huggingface(args: argparse.Namespace, output_dir: Path) -> None:
             "huggingface_hub is required for --upload-to-hf. Install it or rerun without upload."
         ) from exc
 
+    repo_id = args.hf_repo_id.strip("/")
+    if "/" not in repo_id:
+        repo_id = f"{repo_id}/decoder_patch_attribution"
+    path_in_repo = args.hf_path_in_repo.strip("/") or "."
+
     api = HfApi()
     api.create_repo(
-        repo_id=args.hf_repo_id,
+        repo_id=repo_id,
         repo_type=args.hf_repo_type,
         exist_ok=True,
     )
-    api.upload_folder(
-        repo_id=args.hf_repo_id,
-        repo_type=args.hf_repo_type,
-        folder_path=str(output_dir),
-        path_in_repo=args.hf_path_in_repo.strip("/") or ".",
-    )
+    upload_large_folder = getattr(api, "upload_large_folder", None)
+    if upload_large_folder is not None and path_in_repo == ".":
+        upload_large_folder(
+            repo_id=repo_id,
+            repo_type=args.hf_repo_type,
+            folder_path=str(output_dir),
+        )
+    else:
+        api.upload_folder(
+            repo_id=repo_id,
+            repo_type=args.hf_repo_type,
+            folder_path=str(output_dir),
+            path_in_repo=path_in_repo,
+        )
+    return repo_id, path_in_repo
 
 
 def main() -> None:
@@ -635,13 +652,13 @@ def main() -> None:
     print(json.dumps(manifest, indent=2), flush=True)
 
     if args.upload_to_hf:
-        upload_to_huggingface(args, output_dir)
+        uploaded_repo_id, uploaded_path = upload_to_huggingface(args, output_dir)
         print(
             json.dumps(
                 {
-                    "uploaded_to_hf": args.hf_repo_id,
+                    "uploaded_to_hf": uploaded_repo_id,
                     "repo_type": args.hf_repo_type,
-                    "path_in_repo": args.hf_path_in_repo,
+                    "path_in_repo": uploaded_path,
                 },
                 indent=2,
             ),

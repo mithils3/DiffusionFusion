@@ -50,9 +50,9 @@ BATCH_SIZE="${BATCH_SIZE:-1}"
 TARGET="${TARGET:-mean}"
 SAVE_NPZ="${SAVE_NPZ:-0}"
 
-HF_REPO_ID="${HF_REPO_ID:-Mithilss}"
+HF_REPO_ID="${HF_REPO_ID:-Mithilss/decoder_patch_attribution}"
 HF_REPO_TYPE="${HF_REPO_TYPE:-dataset}"
-HF_PATH_IN_REPO="${HF_PATH_IN_REPO:-decoder_patch_attribution}"
+HF_PATH_IN_REPO="${HF_PATH_IN_REPO:-runs}"
 UPLOAD_TO_HF="${UPLOAD_TO_HF:-1}"
 
 CHECKPOINT_NAME="$(basename "$(dirname "${DECODER_CHECKPOINT}")")"
