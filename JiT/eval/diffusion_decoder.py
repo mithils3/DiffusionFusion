@@ -113,6 +113,21 @@ def _resolve_state_dict(
     checkpoint_state: dict,
     model: torch.nn.Module,
 ) -> dict:
+    expected_keys = set(model.state_dict().keys())
+    checkpoint_keys = set(checkpoint_state.keys())
+    if checkpoint_keys == expected_keys:
+        return dict(checkpoint_state)
+
+    for prefix in ("decoder.", "module.decoder."):
+        if not checkpoint_keys or not all(key.startswith(prefix) for key in checkpoint_keys):
+            continue
+        stripped_state = {
+            key.removeprefix(prefix): value
+            for key, value in checkpoint_state.items()
+        }
+        if set(stripped_state.keys()) == expected_keys:
+            return stripped_state
+
     return resolve_strict_state_dict(checkpoint_state, model, label="Decoder")
 
 
