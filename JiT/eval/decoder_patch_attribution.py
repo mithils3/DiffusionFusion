@@ -537,8 +537,8 @@ def main() -> None:
                 if processed_samples >= args.num_images:
                     break
 
-                latent = latent_batch[item_idx : item_idx + 1]
-                dino = dino_batch[item_idx : item_idx + 1]
+                latent = latent_batch[item_idx : item_idx + 1].float()
+                dino = dino_batch[item_idx : item_idx + 1].float()
 
                 with torch.no_grad():
                     preview = decoder.generate(latent, dino)
