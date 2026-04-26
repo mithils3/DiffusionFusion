@@ -208,6 +208,18 @@ def _interpolate_colormap(x: np.ndarray, stops: list[tuple[float, tuple[int, int
     return np.clip(out, 0, 255).astype(np.uint8)
 
 
+ATTRIBUTION_COLORMAP = [
+    (0.00, (72, 0, 118)),
+    (0.16, (45, 23, 180)),
+    (0.32, (24, 103, 220)),
+    (0.48, (28, 185, 205)),
+    (0.64, (62, 210, 84)),
+    (0.78, (238, 220, 58)),
+    (0.90, (246, 130, 42)),
+    (1.00, (210, 32, 32)),
+]
+
+
 def heatmap_image(
     values: np.ndarray,
     size: int,
@@ -219,18 +231,39 @@ def heatmap_image(
     normed = normalize_map(values, vmax=vmax, gamma=gamma)
     colors = _interpolate_colormap(
         normed,
-        [
-            (0.00, (5, 8, 22)),
-            (0.12, (26, 31, 89)),
-            (0.28, (26, 93, 170)),
-            (0.45, (28, 159, 142)),
-            (0.62, (115, 203, 82)),
-            (0.78, (244, 201, 58)),
-            (0.92, (238, 92, 52)),
-            (1.00, (255, 244, 210)),
-        ],
+        ATTRIBUTION_COLORMAP,
     )
     return Image.fromarray(colors, mode="RGB").resize((size, size), resample)
+
+
+def attribution_colorbar(width: int, vmax: float, *, height: int = 46) -> Image.Image:
+    bar_h = 16
+    margin_x = 8
+    gradient_w = max(1, width - margin_x * 2)
+    gradient = np.linspace(0.0, 1.0, gradient_w, dtype=np.float32).reshape(1, gradient_w)
+    colors = _interpolate_colormap(gradient, ATTRIBUTION_COLORMAP)
+    bar = Image.fromarray(colors, mode="RGB").resize(
+        (gradient_w, bar_h),
+        Image.Resampling.BILINEAR,
+    )
+
+    panel = Image.new("RGB", (width, height), "white")
+    panel.paste(bar, (margin_x, 4))
+    draw = ImageDraw.Draw(panel)
+    try:
+        font = ImageFont.truetype("DejaVuSans.ttf", 13)
+    except OSError:
+        font = ImageFont.load_default()
+    draw.text((margin_x, 24), "0", fill=(24, 24, 24), font=font)
+    max_text = f"{vmax:.2e}"
+    text_bbox = draw.textbbox((0, 0), max_text, font=font)
+    text_w = text_bbox[2] - text_bbox[0]
+    draw.text((width - margin_x - text_w, 24), max_text, fill=(24, 24, 24), font=font)
+    title = "shared DINO/latent abs attribution scale"
+    title_bbox = draw.textbbox((0, 0), title, font=font)
+    title_w = title_bbox[2] - title_bbox[0]
+    draw.text(((width - title_w) // 2, 24), title, fill=(24, 24, 24), font=font)
+    return panel
 
 
 def difference_image(values: np.ndarray, size: int, *, percentile: float = 98.0) -> Image.Image:
@@ -345,13 +378,15 @@ def save_figure(
     gap = 8
     canvas = Image.new(
         "RGB",
-        (panels[0].width * 2 + gap, panels[0].height * 2 + gap),
+        (panels[0].width * 2 + gap, panels[0].height * 2 + gap + 46),
         "white",
     )
     for idx, panel in enumerate(panels):
         x = (idx % 2) * (panel.width + gap)
         y = (idx // 2) * (panel.height + gap)
         canvas.paste(panel, (x, y))
+    colorbar = attribution_colorbar(canvas.width, shared_vmax)
+    canvas.paste(colorbar, (0, panels[0].height * 2 + gap))
     canvas.save(path, format="PNG", compress_level=3)
 
 
